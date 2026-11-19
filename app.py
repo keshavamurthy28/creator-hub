@@ -1,4 +1,6 @@
+import os
 import streamlit as st
+from google import genai
 
 # 1. Page Configuration
 st.set_page_config(
@@ -7,7 +9,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom styling for dark-gold theme inspired by your screenshot
 st.markdown("""
     <style>
     .level-header {
@@ -16,27 +17,33 @@ st.markdown("""
         font-weight: bold;
         margin-bottom: 10px;
     }
-    .prompt-box {
-        background-color: #1E1E1E;
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #F5C518;
-    }
     </style>
 """, unsafe_allow_html=True)
 
-# 2. Sidebar - Channel Profile & Level Navigation
+# 2. Sidebar - API Key, Channel Profile & Level Navigation
 with st.sidebar:
     st.title("🎬 Creator Control Panel")
-    st.markdown("Customize your channel details below to automatically inject them into every level's prompt.")
-    
-    channel_topic = st.text_input("Channel Niche / Topic", placeholder="e.g., Stock Market, Life Wisdom, Tech")
-    target_audience = st.text_input("Target Audience", placeholder="e.g., Beginners in India, Young Professionals")
-    video_format = st.selectbox("Primary Format", ["Long-form Videos", "YouTube Shorts", "Both Long-form & Shorts"])
-    
+
+    # Check Streamlit secrets or environment variable first, with optional manual fallback
+    default_api_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
+    if default_api_key:
+        st.success("Gemini API Key loaded from Secrets")
+        api_key = default_api_key
+    else:
+        api_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            placeholder="Paste API key or add to Streamlit Secrets"
+        )
+
     st.divider()
-    
-    # Navigation across the 7 Levels from the screenshot
+    st.markdown("Customize your channel details below:")
+    channel_topic = st.text_input("Channel Niche / Topic", placeholder="e.g., Personal Finance, Life Wisdom")
+    target_audience = st.text_input("Target Audience", placeholder="e.g., Beginners, Young Professionals")
+    video_format = st.selectbox("Primary Format", ["Long-form Videos", "YouTube Shorts", "Both Long-form & Shorts"])
+
+    st.divider()
+
     selected_level = st.radio(
         "Select Your Creator Level:",
         [
@@ -50,12 +57,16 @@ with st.sidebar:
         ]
     )
 
-# Helper function to format user context
 context_addon = ""
 if channel_topic or target_audience:
-    context_addon = f"\n\nMy Channel Context:\n- Niche/Topic: {channel_topic or 'Not specified'}\n- Target Audience: {target_audience or 'General audience'}\n- Format: {video_format}"
+    context_addon = (
+        f"\n\nMy Channel Context:\n"
+        f"- Niche/Topic: {channel_topic or 'Not specified'}\n"
+        f"- Target Audience: {target_audience or 'General audience'}\n"
+        f"- Format: {video_format}"
+    )
 
-# 3. Data Dictionary containing all 7 Prompts from your screenshot
+# 3. Data Dictionary for All 7 Levels
 levels_data = {
     "Level 1: Full Channel Plan": {
         "title": "1. Your Full Channel Plan",
@@ -146,7 +157,7 @@ with col1:
 with col2:
     st.success(f"**Primary Objective:** {current_data['goal']}")
 
-# Level-Specific Extra Inputs (Makes the app truly interactive!)
+# Level-Specific Extra Inputs
 extra_details = ""
 st.subheader("🎯 Customize This Level")
 
@@ -162,14 +173,39 @@ elif selected_level == "Level 7: Read Analytics Like a Pro":
     views = c3.number_input("Avg Views per Video", min_value=0, value=500, step=50)
     extra_details = f"\n- Current Metrics: CTR is {ctr}%, Avg View Duration is {avd or 'N/A'}, Avg Views: {views}"
 
-# 5. Final Generated Prompt Output
-st.subheader("📋 Ready-to-Use Prompt")
-st.caption("Click the copy icon in the top-right corner of the box below, then paste it into Gemini or ChatGPT.")
-
+# 5. Prompt Preview & Live AI Generation
 final_prompt = current_data["prompt"] + context_addon + extra_details
-st.code(final_prompt, language="markdown")
 
-# Progress Tracker at the bottom
+with st.expander("📋 View / Copy Raw Prompt"):
+    st.code(final_prompt, language="markdown")
+
+if st.button("🚀 Generate AI Response Now", type="primary"):
+    if not api_key:
+        st.error("Please enter a Gemini API key or add `GEMINI_API_KEY` to your Streamlit Secrets.")
+    else:
+        with st.spinner("Generating your YouTube strategy with Gemini..."):
+            try:
+                client = genai.Client(api_key=api_key)
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=final_prompt,
+                )
+                st.session_state["last_output"] = response.text
+                st.session_state["last_level"] = current_data["title"]
+            except Exception as e:
+                st.error(f"Error calling Gemini API: {e}")
+
+if "last_output" in st.session_state:
+    st.subheader(f"✨ Output: {st.session_state.get('last_level', selected_level)}")
+    st.markdown(st.session_state["last_output"])
+    st.download_button(
+        label="⬇️ Download Response (.md)",
+        data=st.session_state["last_output"],
+        file_name=f"{selected_level.lower().replace(' ', '_').replace(':', '')}.md",
+        mime="text/markdown"
+    )
+
+# Progress Tracker
 st.divider()
 level_number = int(selected_level.split(":")[0].replace("Level ", ""))
 st.write(f"**Creator Journey Progress:** Level {level_number} of 7")
