@@ -25,9 +25,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Initialize per-level mind words storage in session state
+# Initialize session state stores
 if "level_mind_words" not in st.session_state:
     st.session_state["level_mind_words"] = {}
+if "all_level_outputs" not in st.session_state:
+    st.session_state["all_level_outputs"] = {}
 
 # 2. Sidebar - API Key, Channel Profile & Level Navigation
 with st.sidebar:
@@ -44,9 +46,10 @@ with st.sidebar:
             placeholder="Paste API key or add to Streamlit Secrets",
         )
 
+    # Put gemini-3.5-flash-lite first by default to avoid gemini-3.8-flash 503/504 stalls
     preferred_model = st.selectbox(
         "Primary Gemini Model",
-        ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"],
+        ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen"],
         index=0,
     )
 
@@ -178,6 +181,56 @@ levels_data = {
     },
 }
 
+
+def build_prompt_for_level(lvl_key: str, current_mind_text: str = "") -> str:
+    lvl_info = levels_data[lvl_key]
+    details = ""
+
+    if lvl_key == "Level 3: Viral Scripts, Hooks & Thumbnails":
+        v_topic = st.session_state.get(f"video_topic_{lvl_key}", "")
+        if v_topic:
+            details += f"\n- Specific Video Topic: {v_topic}"
+
+    elif lvl_key == "Level 7: Read Analytics Like a Pro":
+        c_val = st.session_state.get("analytics_ctr", 4.5)
+        a_val = st.session_state.get("analytics_avd", "")
+        v_val = st.session_state.get("analytics_views", 500)
+        details += (
+            f"\n- Current Metrics: CTR is {c_val}%, "
+            f"Avg View Duration is {a_val or 'N/A'}, Avg Views: {v_val}"
+        )
+
+    saved_mind = current_mind_text if current_mind_text else st.session_state["level_mind_words"].get(lvl_key, "")
+    if saved_mind.strip():
+        details += f"\n- My Mind Words / Personal Notes for This Level:\n{saved_mind.strip()}"
+
+    return lvl_info["prompt"] + context_addon + details
+
+
+def generate_with_fallback(client: genai.Client, prompt_text: str, primary_model: str, status_box):
+    all_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen"]
+    ordered_models = [primary_model] + [m for m in all_models if m != primary_model]
+
+    last_err = None
+    for m_name in ordered_models:
+        for attempt in range(2):
+            status_box.write(f"Running `{m_name}` (attempt {attempt + 1}/2)...")
+            try:
+                res = client.models.generate_content(
+                    model=m_name,
+                    contents=prompt_text,
+                )
+                return res.text, m_name, None
+            except Exception as exc:
+                last_err = exc
+                status_box.write(f"`{m_name}` attempt {attempt + 1} issue: {exc}")
+                if attempt == 0:
+                    time.sleep(1)
+                    continue
+                break
+    return None, None, last_err
+
+
 # 4. Main Display Area
 current_data = levels_data[selected_level]
 
@@ -190,29 +243,21 @@ with col2:
     st.success(f"**Primary Objective:** {current_data['goal']}")
 
 # Level-Specific Extra Inputs + Per-Level "My Mind Words" Box
-extra_details = ""
 st.subheader("🎯 Customize This Level")
 
 if selected_level == "Level 3: Viral Scripts, Hooks & Thumbnails":
-    video_topic = st.text_input(
+    st.text_input(
         "Specific Video Topic for Script/Hook:",
         placeholder="e.g., 5 Habits That Changed My Life",
         key=f"video_topic_{selected_level}",
     )
-    if video_topic:
-        extra_details += f"\n- Specific Video Topic: {video_topic}"
 
 elif selected_level == "Level 7: Read Analytics Like a Pro":
     c1, c2, c3 = st.columns(3)
-    ctr = c1.number_input("Current CTR (%)", min_value=0.0, max_value=100.0, value=4.5, step=0.1, key="analytics_ctr")
-    avd = c2.text_input("Avg View Duration", placeholder="e.g., 3:45 out of 10:00", key="analytics_avd")
-    views = c3.number_input("Avg Views per Video", min_value=0, value=500, step=50, key="analytics_views")
-    extra_details += (
-        f"\n- Current Metrics: CTR is {ctr}%, "
-        f"Avg View Duration is {avd or 'N/A'}, Avg Views: {views}"
-    )
+    c1.number_input("Current CTR (%)", min_value=0.0, max_value=100.0, value=4.5, step=0.1, key="analytics_ctr")
+    c2.text_input("Avg View Duration", placeholder="e.g., 3:45 out of 10:00", key="analytics_avd")
+    c3.number_input("Avg Views per Video", min_value=0, value=500, step=50, key="analytics_views")
 
-# Common "My Mind Words" input available on EVERY level and remembered per level
 existing_mind_words = st.session_state["level_mind_words"].get(selected_level, "")
 mind_words = st.text_area(
     "💭 My Mind Words (Type any raw thoughts, ideas, or custom notes for this level — auto-updates the prompt)",
@@ -223,74 +268,111 @@ mind_words = st.text_area(
 )
 st.session_state["level_mind_words"][selected_level] = mind_words
 
-if mind_words.strip():
-    extra_details += f"\n- My Mind Words / Personal Notes for This Level:\n{mind_words.strip()}"
+# 5. Live Prompt Preview & Automated Generation Controls
+final_prompt = build_prompt_for_level(selected_level, mind_words)
 
-# 5. Live Auto-Updating Prompt Preview & AI Generation
-final_prompt = current_data["prompt"] + context_addon + extra_details
-
-with st.expander("📋 View / Copy Auto-Updated Prompt", expanded=True):
+with st.expander("📋 View / Copy Auto-Updated Prompt", expanded=False):
     st.code(final_prompt, language="markdown")
 
-if st.button("🚀 Generate AI Response Now", type="primary"):
+btn_col1, btn_col2 = st.columns(2)
+run_single = btn_col1.button("🚀 Generate Selected Level", type="primary", use_container_width=True)
+run_all_seven = btn_col2.button("⚡ Automate All 7 Levels Now", use_container_width=True)
+
+if run_single:
     if not api_key:
         st.error("Please enter a Gemini API key or add `GEMINI_API_KEY` to your Streamlit Secrets.")
     else:
-        fallback_models = [
-            m for m in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"]
-            if m != preferred_model
-        ]
-        models_to_try = [preferred_model] + fallback_models
-        response_text = None
-        last_error = None
-        used_model = None
-
-        with st.status("Generating your YouTube strategy with Gemini...", expanded=True) as status:
+        with st.status(f"Generating {current_data['title']}...", expanded=True) as status:
             client = genai.Client(
                 api_key=api_key,
-                http_options=types.HttpOptions(timeout=20000),
+                http_options=types.HttpOptions(timeout=25000),
+            )
+            out_text, used_m, err = generate_with_fallback(client, final_prompt, preferred_model, status)
+            if out_text:
+                status.update(label=f"Completed {current_data['title']} using {used_m}!", state="complete", expanded=False)
+                st.session_state["all_level_outputs"][selected_level] = {
+                    "title": current_data["title"],
+                    "model": used_m,
+                    "content": out_text,
+                }
+                st.session_state["last_output"] = out_text
+                st.session_state["last_level"] = f"{current_data['title']} ({used_m})"
+            else:
+                status.update(label="Generation failed", state="error", expanded=True)
+                st.error(f"Could not complete generation. Details: {err}")
+
+if run_all_seven:
+    if not api_key:
+        st.error("Please enter a Gemini API key or add `GEMINI_API_KEY` to your Streamlit Secrets.")
+    else:
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=25000),
+        )
+        progress_bar = st.progress(0.0)
+        with st.status("Automating all 7 YouTube Creator levels back-to-back...", expanded=True) as status:
+            for idx, lvl_key in enumerate(level_keys, start=1):
+                lvl_title = levels_data[lvl_key]["title"]
+                status.write(f"--- Starting {lvl_title} ({idx}/7) ---")
+                lvl_prompt = build_prompt_for_level(lvl_key)
+                out_text, used_m, err = generate_with_fallback(client, lvl_prompt, preferred_model, status)
+
+                if out_text:
+                    st.session_state["all_level_outputs"][lvl_key] = {
+                        "title": lvl_title,
+                        "model": used_m,
+                        "content": out_text,
+                    }
+                    st.session_state["last_output"] = out_text
+                    st.session_state["last_level"] = f"{lvl_title} ({used_m})"
+                    status.write(f"✅ Finished {lvl_title} via `{used_m}`")
+                else:
+                    status.write(f"⚠️ Skipped {lvl_title} due to error: {err}")
+
+                progress_bar.progress(idx / len(level_keys))
+
+            completed_count = len(st.session_state["all_level_outputs"])
+            status.update(
+                label=f"Automation complete! {completed_count}/7 levels generated.",
+                state="complete",
+                expanded=False,
             )
 
-            for model_name in models_to_try:
-                for attempt in range(2):
-                    st.write(f"Trying `{model_name}` (attempt {attempt + 1}/2)...")
-                    try:
-                        response = client.models.generate_content(
-                            model=model_name,
-                            contents=final_prompt,
-                        )
-                        response_text = response.text
-                        used_model = model_name
-                        status.update(
-                            label=f"Completed using {model_name}!",
-                            state="complete",
-                            expanded=False,
-                        )
-                        break
-                    except Exception as e:
-                        last_error = e
-                        st.write(f"Attempt {attempt + 1} on `{model_name}` hit an issue: {e}")
-                        if attempt == 0:
-                            time.sleep(1)
-                            continue
-                        break
-                if response_text:
-                    break
+# 6. Combined Full Playbook Download + Outputs Display
+all_outputs = st.session_state.get("all_level_outputs", {})
+if all_outputs:
+    combined_md_parts = [
+        "# Complete 7-Level YouTube Creator Playbook",
+        f"- **Channel Niche / Topic:** {channel_topic or 'Not specified'}",
+        f"- **Target Audience:** {target_audience or 'General audience'}",
+        f"- **Primary Format:** {video_format}",
+        "",
+        "---",
+    ]
+    for lvl_key in level_keys:
+        if lvl_key in all_outputs:
+            item = all_outputs[lvl_key]
+            combined_md_parts.append(f"\n## {item['title']} *(Model: {item['model']})*\n")
+            combined_md_parts.append(item["content"])
+            combined_md_parts.append("\n---\n")
 
-            if not response_text:
-                status.update(label="Generation failed", state="error", expanded=True)
+    combined_markdown = "\n".join(combined_md_parts)
 
-        if response_text:
-            st.session_state["last_output"] = response_text
-            st.session_state["last_level"] = f"{current_data['title']} ({used_model})"
-        else:
-            st.error(f"Could not complete generation. Details: {last_error}")
+    st.divider()
+    st.subheader("📦 Complete Automated Playbook")
+    st.download_button(
+        label=f"⬇️ Download All {len(all_outputs)} Completed Levels (.md)",
+        data=combined_markdown,
+        file_name="youtube_7_level_complete_playbook.md",
+        mime="text/markdown",
+        type="primary",
+    )
 
 if "last_output" in st.session_state:
-    st.subheader(f"✨ Output: {st.session_state.get('last_level', selected_level)}")
+    st.subheader(f"✨ Latest Output: {st.session_state.get('last_level', selected_level)}")
     st.markdown(st.session_state["last_output"])
     st.download_button(
-        label="⬇️ Download Response (.md)",
+        label="⬇️ Download Latest Level (.md)",
         data=st.session_state["last_output"],
         file_name=f"{selected_level.lower().replace(' ', '_').replace(':', '')}.md",
         mime="text/markdown",
