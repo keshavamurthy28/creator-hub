@@ -187,7 +187,7 @@ if st.button("🚀 Generate AI Response Now", type="primary"):
             try:
                 client = genai.Client(api_key=api_key)
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                   model="gemini-3.8-flash",
                     contents=final_prompt,
                 )
                 st.session_state["last_output"] = response.text
