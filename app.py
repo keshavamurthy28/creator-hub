@@ -25,11 +25,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Initialize per-level mind words storage in session state
+if "level_mind_words" not in st.session_state:
+    st.session_state["level_mind_words"] = {}
+
 # 2. Sidebar - API Key, Channel Profile & Level Navigation
 with st.sidebar:
     st.title("🎬 Creator Control Panel")
 
-    # Check Streamlit secrets or environment variable first, with optional manual fallback
     default_api_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
     if default_api_key:
         st.success("Gemini API Key loaded from Secrets")
@@ -64,17 +67,19 @@ with st.sidebar:
 
     st.divider()
 
+    level_keys = [
+        "Level 1: Full Channel Plan",
+        "Level 2: Pick a Niche",
+        "Level 3: Viral Scripts, Hooks & Thumbnails",
+        "Level 4: Growth & Algorithm",
+        "Level 5: Produce Videos 3x Faster",
+        "Level 6: Monetization Plan",
+        "Level 7: Read Analytics Like a Pro",
+    ]
+
     selected_level = st.radio(
         "Select Your Creator Level:",
-        [
-            "Level 1: Full Channel Plan",
-            "Level 2: Pick a Niche",
-            "Level 3: Viral Scripts, Hooks & Thumbnails",
-            "Level 4: Growth & Algorithm",
-            "Level 5: Produce Videos 3x Faster",
-            "Level 6: Monetization Plan",
-            "Level 7: Read Analytics Like a Pro",
-        ],
+        level_keys,
     )
 
 context_addon = ""
@@ -92,6 +97,7 @@ levels_data = {
         "title": "1. Your Full Channel Plan",
         "role": "Expert YouTube Strategist & Monetization Consultant",
         "goal": "Build a complete roadmap from zero to monetization.",
+        "mind_placeholder": "Type raw thoughts about your available time, budget, language, comfort on camera, or long-term vision...",
         "prompt": (
             "Act as an expert YouTube strategist and monetization consultant. Develop a comprehensive plan for launching a YouTube channel from scratch and working toward monetization.\n"
             "Evaluate my niche, target audience, competitors, available resources, and long-term goals.\n"
@@ -102,6 +108,7 @@ levels_data = {
         "title": "2. Pick a Niche",
         "role": "YouTube Market Researcher & Channel Strategist",
         "goal": "Find a profitable niche and generate 100 ranked video ideas.",
+        "mind_placeholder": "Type sub-topics you naturally enjoy thinking/talking about, specific struggles people face, or angles you want to avoid...",
         "prompt": (
             "Act as an experienced YouTube market researcher and channel strategist.\n"
             "Help me choose a profitable YouTube niche with strong audience demand and long-term growth potential.\n"
@@ -113,6 +120,7 @@ levels_data = {
         "title": "3. Create Viral Scripts, Hooks, and Thumbnails",
         "role": "Elite YouTube Content Strategist & Video Producer",
         "goal": "Maximize Click-Through Rate (CTR) and average view duration.",
+        "mind_placeholder": "Type raw hook lines, story examples, emotional angles, or specific points you want woven into the script...",
         "prompt": (
             "Act as an elite YouTube content strategist and video producer.\n"
             "Develop a complete content creation framework designed to improve click-through rates and audience retention.\n"
@@ -124,6 +132,7 @@ levels_data = {
         "title": "4. Understand YouTube Growth and Algorithm",
         "role": "YouTube Growth Strategist",
         "goal": "Master impressions, CTR, watch time, and converting viewers into subscribers.",
+        "mind_placeholder": "Type questions about impressions, browse vs. search traffic, upload rhythm, or where viewers usually drop off...",
         "prompt": (
             "Act as a YouTube growth strategist with expertise in content discovery and audience behavior.\n"
             "Explain how YouTube growth works, including impressions, click-through rates, watch time, audience retention, returning viewers, suggested videos, search traffic, and recommendation systems.\n"
@@ -134,6 +143,7 @@ levels_data = {
         "title": "5. Produce Videos 3x Faster",
         "role": "Professional YouTube Production Manager",
         "goal": "Build an AI-assisted workflow and repurpose content across Shorts/Reels.",
+        "mind_placeholder": "Type which part slows you down most (scripting, voiceover, editing, thumbnails, or Shorts repurposing) and tools you prefer...",
         "prompt": (
             "Act as a professional YouTube production manager.\n"
             "Design an AI-assisted workflow that helps me create high-quality YouTube videos more efficiently.\n"
@@ -145,6 +155,7 @@ levels_data = {
         "title": "6. Build Your Monetization Plan",
         "role": "Creator Business Strategist",
         "goal": "Diversify revenue beyond ads (affiliates, sponsorships, digital products).",
+        "mind_placeholder": "Type income ideas you like (guides, templates, books, coaching, sponsorships) and your timeline expectations...",
         "prompt": (
             "Act as a creator business strategist specializing in YouTube monetization.\n"
             "Develop a comprehensive revenue strategy for my YouTube channel.\n"
@@ -156,6 +167,7 @@ levels_data = {
         "title": "7. Read Your Analytics Like a Pro",
         "role": "Experienced YouTube Data Analyst",
         "goal": "Diagnose underperforming videos and build weekly/monthly review frameworks.",
+        "mind_placeholder": "Type observations from your recent videos, retention dips, comment feedback, or what surprised you in analytics...",
         "prompt": (
             "Act as an experienced YouTube data analyst.\n"
             "Create a comprehensive system for monitoring, evaluating, and improving my channel's performance.\n"
@@ -177,7 +189,7 @@ with col1:
 with col2:
     st.success(f"**Primary Objective:** {current_data['goal']}")
 
-# Level-Specific Extra Inputs
+# Level-Specific Extra Inputs + Per-Level "My Mind Words" Box
 extra_details = ""
 st.subheader("🎯 Customize This Level")
 
@@ -185,31 +197,49 @@ if selected_level == "Level 3: Viral Scripts, Hooks & Thumbnails":
     video_topic = st.text_input(
         "Specific Video Topic for Script/Hook:",
         placeholder="e.g., 5 Habits That Changed My Life",
+        key=f"video_topic_{selected_level}",
     )
     if video_topic:
-        extra_details = f"\n- Specific Video Topic: {video_topic}"
+        extra_details += f"\n- Specific Video Topic: {video_topic}"
 
 elif selected_level == "Level 7: Read Analytics Like a Pro":
     c1, c2, c3 = st.columns(3)
-    ctr = c1.number_input("Current CTR (%)", min_value=0.0, max_value=100.0, value=4.5, step=0.1)
-    avd = c2.text_input("Avg View Duration", placeholder="e.g., 3:45 out of 10:00")
-    views = c3.number_input("Avg Views per Video", min_value=0, value=500, step=50)
-    extra_details = (
+    ctr = c1.number_input("Current CTR (%)", min_value=0.0, max_value=100.0, value=4.5, step=0.1, key="analytics_ctr")
+    avd = c2.text_input("Avg View Duration", placeholder="e.g., 3:45 out of 10:00", key="analytics_avd")
+    views = c3.number_input("Avg Views per Video", min_value=0, value=500, step=50, key="analytics_views")
+    extra_details += (
         f"\n- Current Metrics: CTR is {ctr}%, "
         f"Avg View Duration is {avd or 'N/A'}, Avg Views: {views}"
     )
 
-# 5. Prompt Preview & Live AI Generation (with timeout, retry, model fallback & live status)
+# Common "My Mind Words" input available on EVERY level and remembered per level
+existing_mind_words = st.session_state["level_mind_words"].get(selected_level, "")
+mind_words = st.text_area(
+    "💭 My Mind Words (Type any raw thoughts, ideas, or custom notes for this level — auto-updates the prompt)",
+    value=existing_mind_words,
+    height=110,
+    placeholder=current_data["mind_placeholder"],
+    key=f"mind_words_input_{selected_level}",
+)
+st.session_state["level_mind_words"][selected_level] = mind_words
+
+if mind_words.strip():
+    extra_details += f"\n- My Mind Words / Personal Notes for This Level:\n{mind_words.strip()}"
+
+# 5. Live Auto-Updating Prompt Preview & AI Generation
 final_prompt = current_data["prompt"] + context_addon + extra_details
 
-with st.expander("📋 View / Copy Raw Prompt"):
+with st.expander("📋 View / Copy Auto-Updated Prompt", expanded=True):
     st.code(final_prompt, language="markdown")
 
 if st.button("🚀 Generate AI Response Now", type="primary"):
     if not api_key:
         st.error("Please enter a Gemini API key or add `GEMINI_API_KEY` to your Streamlit Secrets.")
     else:
-        fallback_models = [m for m in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"] if m != preferred_model]
+        fallback_models = [
+            m for m in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"]
+            if m != preferred_model
+        ]
         models_to_try = [preferred_model] + fallback_models
         response_text = None
         last_error = None
@@ -218,7 +248,7 @@ if st.button("🚀 Generate AI Response Now", type="primary"):
         with st.status("Generating your YouTube strategy with Gemini...", expanded=True) as status:
             client = genai.Client(
                 api_key=api_key,
-                http_options=types.HttpOptions(timeout=20000),  # 20s timeout per request
+                http_options=types.HttpOptions(timeout=20000),
             )
 
             for model_name in models_to_try:
