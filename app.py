@@ -2,6 +2,7 @@ import os
 import time
 import streamlit as st
 from google import genai
+from google.genai import types
 
 # 1. Page Configuration
 st.set_page_config(
@@ -39,6 +40,12 @@ with st.sidebar:
             type="password",
             placeholder="Paste API key or add to Streamlit Secrets",
         )
+
+    preferred_model = st.selectbox(
+        "Primary Gemini Model",
+        ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"],
+        index=0,
+    )
 
     st.divider()
     st.markdown("Customize your channel details below:")
@@ -192,7 +199,7 @@ elif selected_level == "Level 7: Read Analytics Like a Pro":
         f"Avg View Duration is {avd or 'N/A'}, Avg Views: {views}"
     )
 
-# 5. Prompt Preview & Live AI Generation (with retry, model fallback & live status)
+# 5. Prompt Preview & Live AI Generation (with timeout, retry, model fallback & live status)
 final_prompt = current_data["prompt"] + context_addon + extra_details
 
 with st.expander("📋 View / Copy Raw Prompt"):
@@ -202,13 +209,17 @@ if st.button("🚀 Generate AI Response Now", type="primary"):
     if not api_key:
         st.error("Please enter a Gemini API key or add `GEMINI_API_KEY` to your Streamlit Secrets.")
     else:
-        models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"]
+        fallback_models = [m for m in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"] if m != preferred_model]
+        models_to_try = [preferred_model] + fallback_models
         response_text = None
         last_error = None
         used_model = None
 
         with st.status("Generating your YouTube strategy with Gemini...", expanded=True) as status:
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=20000),  # 20s timeout per request
+            )
 
             for model_name in models_to_try:
                 for attempt in range(2):
@@ -228,9 +239,9 @@ if st.button("🚀 Generate AI Response Now", type="primary"):
                         break
                     except Exception as e:
                         last_error = e
-                        if "503" in str(e) or "UNAVAILABLE" in str(e):
-                            st.write("Model temporarily busy (503). Waiting 2 seconds before retrying...")
-                            time.sleep(2)
+                        st.write(f"Attempt {attempt + 1} on `{model_name}` hit an issue: {e}")
+                        if attempt == 0:
+                            time.sleep(1)
                             continue
                         break
                 if response_text:
@@ -243,7 +254,7 @@ if st.button("🚀 Generate AI Response Now", type="primary"):
             st.session_state["last_output"] = response_text
             st.session_state["last_level"] = f"{current_data['title']} ({used_model})"
         else:
-            st.error(f"All models are temporarily busy. Please try again in a moment. Details: {last_error}")
+            st.error(f"Could not complete generation. Details: {last_error}")
 
 if "last_output" in st.session_state:
     st.subheader(f"✨ Output: {st.session_state.get('last_level', selected_level)}")
