@@ -1,8 +1,12 @@
 import os
+import tempfile
+import textwrap
 import time
-import streamlit as st
 from google import genai
 from google.genai import types
+from moviepy import AudioFileClip, CompositeAudioClip, ImageClip, concatenate_videoclips
+from PIL import Image, ImageDraw, ImageFont
+import streamlit as st
 
 # 1. Page Configuration
 st.set_page_config(
@@ -30,6 +34,35 @@ if "level_mind_words" not in st.session_state:
     st.session_state["level_mind_words"] = {}
 if "all_level_outputs" not in st.session_state:
     st.session_state["all_level_outputs"] = {}
+if "video_scenes" not in st.session_state:
+    st.session_state["video_scenes"] = [
+        {
+            "spot": 1,
+            "title": "Opening Hook",
+            "duration": 6,
+            "text": "Most beginners stay stuck in life wisdom because they consume advice without applying one habit.",
+            "bg_color": "#141824",
+            "image_bytes": None,
+            "image_name": None,
+            "audio_bytes": None,
+            "audio_name": None,
+            "audio_volume": 0.6,
+        },
+        {
+            "spot": 2,
+            "title": "Core Lesson",
+            "duration": 8,
+            "text": "Pick one practical mindset shift this week, test it daily, and track what actually changes.",
+            "bg_color": "#1B2232",
+            "image_bytes": None,
+            "image_name": None,
+            "audio_bytes": None,
+            "audio_name": None,
+            "audio_volume": 0.6,
+        },
+    ]
+if "rendered_video_bytes" not in st.session_state:
+    st.session_state["rendered_video_bytes"] = None
 
 # 2. Sidebar - API Key, Channel Profile & Level Navigation
 with st.sidebar:
@@ -46,7 +79,6 @@ with st.sidebar:
             placeholder="Paste API key or add to Streamlit Secrets",
         )
 
-    # Put gemini-3.5-flash-lite first by default to avoid gemini-3.8-flash 503/504 stalls
     preferred_model = st.selectbox(
         "Primary Gemini Model",
         ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen"],
@@ -231,6 +263,103 @@ def generate_with_fallback(client: genai.Client, prompt_text: str, primary_model
     return None, None, last_err
 
 
+def hex_to_rgb(hex_str: str):
+    cleaned = hex_str.lstrip("#")
+    if len(cleaned) != 6:
+        return (20, 24, 36)
+    return tuple(int(cleaned[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def create_scene_frame_image(scene: dict, width: int, height: int, temp_dir: str) -> str:
+    bg_rgb = hex_to_rgb(scene.get("bg_color", "#141824"))
+    canvas = Image.new("RGB", (width, height), bg_rgb)
+
+    if scene.get("image_bytes"):
+        img_path = os.path.join(temp_dir, f"src_img_{scene['spot']}.png")
+        with open(img_path, "wb") as f:
+            f.write(scene["image_bytes"])
+        uploaded_img = Image.open(img_path).convert("RGB")
+        # Fit uploaded image nicely in upper/center area
+        max_w = int(width * 0.78)
+        max_h = int(height * 0.48)
+        uploaded_img.thumbnail((max_w, max_h))
+        x_pos = (width - uploaded_img.width) // 2
+        y_pos = int(height * 0.14)
+        canvas.paste(uploaded_img, (x_pos, y_pos))
+        text_y_start = y_pos + uploaded_img.height + 36
+    else:
+        text_y_start = int(height * 0.28)
+
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+
+    spot_label = f"Spot {scene['spot']} — {scene.get('title', 'Scene')}"
+    draw.text((60, 40), spot_label, fill=(245, 197, 24), font=font)
+
+    wrapped_lines = textwrap.wrap(scene.get("text", ""), width=55)
+    cur_y = text_y_start
+    for line in wrapped_lines[:10]:
+        if cur_y > height - 60:
+            break
+        draw.text((60, cur_y), line, fill=(245, 245, 245), font=font)
+        cur_y += 22
+
+    out_frame_path = os.path.join(temp_dir, f"frame_spot_{scene['spot']}.png")
+    canvas.save(out_frame_path)
+    return out_frame_path
+
+
+def render_scenes_to_mp4(scenes: list, resolution_choice: str) -> bytes:
+    if resolution_choice == "Vertical Shorts (1080x1920)":
+        w, h = 1080, 1920
+    else:
+        w, h = 1280, 720
+
+    clips = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for scene in scenes:
+            dur = max(2, int(scene.get("duration", 6)))
+            frame_file = create_scene_frame_image(scene, w, h, tmpdir)
+            img_clip = ImageClip(frame_file).with_duration(dur)
+
+            if scene.get("audio_bytes"):
+                ext = ".wav" if (scene.get("audio_name") or "").lower().endswith(".wav") else ".mp3"
+                aud_path = os.path.join(tmpdir, f"audio_spot_{scene['spot']}{ext}")
+                with open(aud_path, "wb") as af:
+                    af.write(scene["audio_bytes"])
+                try:
+                    aud_clip = AudioFileClip(aud_path)
+                    vol = float(scene.get("audio_volume", 0.6))
+                    aud_clip = aud_clip.with_volume_scaled(vol)
+                    if aud_clip.duration > dur:
+                        aud_clip = aud_clip.subclipped(0, dur)
+                    img_clip = img_clip.with_audio(aud_clip)
+                except Exception:
+                    pass
+
+            clips.append(img_clip)
+
+        final_video = concatenate_videoclips(clips, method="compose")
+        out_mp4 = os.path.join(tmpdir, "final_youtube_video.mp4")
+        has_audio = any(s.get("audio_bytes") for s in scenes)
+        final_video.write_videofile(
+            out_mp4,
+            fps=24,
+            codec="libx264",
+            audio_codec="aac" if has_audio else None,
+            logger=None,
+        )
+
+        with open(out_mp4, "rb") as vf:
+            mp4_data = vf.read()
+
+        final_video.close()
+        for c in clips:
+            c.close()
+
+        return mp4_data
+
+
 # 4. Main Display Area
 current_data = levels_data[selected_level]
 
@@ -376,6 +505,138 @@ if "last_output" in st.session_state:
         data=st.session_state["last_output"],
         file_name=f"{selected_level.lower().replace(' ', '_').replace(':', '')}.md",
         mime="text/markdown",
+    )
+
+# 7. Filter, Select, Edit & Assemble Video Spots
+st.divider()
+st.subheader("🎞️ Video Scene & Media Studio (Filter, Edit, Insert Media & Export .mp4)")
+
+available_levels = list(all_outputs.keys())
+if available_levels:
+    filter_query = st.text_input(
+        "Filter Generated Levels by Keyword:",
+        placeholder="e.g., hook, script, retention, pillar, monetization",
+    )
+    filtered_levels = [
+        k
+        for k in available_levels
+        if not filter_query.strip()
+        or filter_query.lower() in k.lower()
+        or filter_query.lower() in all_outputs[k]["content"].lower()
+    ]
+
+    if filtered_levels:
+        chosen_source_level = st.selectbox("Select Generated Level to Inspect or Split into Spots:", filtered_levels)
+        source_text = all_outputs[chosen_source_level]["content"]
+        st.text_area("Editable Source Draft (Edit text before turning into spots):", value=source_text, height=160, key="editable_source_draft")
+
+        split_col1, split_col2 = st.columns(2)
+        if split_col1.button("➕ Add New Spot at End"):
+            next_spot_num = len(st.session_state["video_scenes"]) + 1
+            st.session_state["video_scenes"].append(
+                {
+                    "spot": next_spot_num,
+                    "title": f"Spot {next_spot_num}",
+                    "duration": 6,
+                    "text": st.session_state.get("editable_source_draft", "")[:240],
+                    "bg_color": "#141824",
+                    "image_bytes": None,
+                    "image_name": None,
+                    "audio_bytes": None,
+                    "audio_name": None,
+                    "audio_volume": 0.6,
+                }
+            )
+            st.rerun()
+
+        if split_col2.button("✂️ Auto-Create 3 Spots from Editable Draft"):
+            raw_draft = st.session_state.get("editable_source_draft", "").strip()
+            chunks = [p.strip() for p in raw_draft.split("\n\n") if p.strip()]
+            picked_chunks = chunks[:3] if len(chunks) >= 3 else (raw_draft or "Life wisdom point").split(". ")[:3]
+            new_scenes = []
+            for idx, part in enumerate(picked_chunks, start=1):
+                new_scenes.append(
+                    {
+                        "spot": idx,
+                        "title": f"Scene {idx} ({chosen_source_level.split(':')[0]})",
+                        "duration": 7,
+                        "text": part[:350],
+                        "bg_color": "#141824" if idx % 2 == 1 else "#1D2436",
+                        "image_bytes": None,
+                        "image_name": None,
+                        "audio_bytes": None,
+                        "audio_name": None,
+                        "audio_volume": 0.6,
+                    }
+                )
+            if new_scenes:
+                st.session_state["video_scenes"] = new_scenes
+                st.rerun()
+    else:
+        st.warning("No generated levels match your filter keyword.")
+else:
+    st.info("Generate at least one level above to filter and pull text into video spots—or edit your starter spots directly below.")
+
+# Spot-by-Spot Editor (Text, Image & Audio/Song/SFX at Specific Spots)
+st.markdown("### 🧩 Spot-by-Spot Timeline Editor")
+for idx, scene in enumerate(st.session_state["video_scenes"]):
+    with st.expander(f"Spot {idx + 1}: {scene.get('title', 'Scene')} ({scene.get('duration', 6)}s)", expanded=(idx == 0)):
+        sc1, sc2, sc3 = st.columns([2, 1, 1])
+        scene["title"] = sc1.text_input("Spot Label", value=scene.get("title", f"Spot {idx + 1}"), key=f"spot_title_{idx}")
+        scene["duration"] = sc2.number_input("Duration (sec)", min_value=2, max_value=60, value=int(scene.get("duration", 6)), key=f"spot_dur_{idx}")
+        scene["bg_color"] = sc3.text_input("Background Hex", value=scene.get("bg_color", "#141824"), key=f"spot_bg_{idx}")
+
+        scene["text"] = st.text_area("On-Screen / Narration Text for This Spot", value=scene.get("text", ""), height=90, key=f"spot_text_{idx}")
+
+        m1, m2, m3 = st.columns([2, 2, 1])
+        img_file = m1.file_uploader(f"Insert Image at Spot {idx + 1}", type=["png", "jpg", "jpeg"], key=f"spot_img_{idx}")
+        if img_file is not None:
+            scene["image_bytes"] = img_file.getvalue()
+            scene["image_name"] = img_file.name
+
+        aud_file = m2.file_uploader(f"Insert Song / Sound / Voice at Spot {idx + 1}", type=["mp3", "wav", "m4a"], key=f"spot_aud_{idx}")
+        if aud_file is not None:
+            scene["audio_bytes"] = aud_file.getvalue()
+            scene["audio_name"] = aud_file.name
+
+        scene["audio_volume"] = m3.slider("Audio Vol", min_value=0.0, max_value=1.5, value=float(scene.get("audio_volume", 0.6)), step=0.1, key=f"spot_vol_{idx}")
+
+        if scene.get("image_name"):
+            st.caption(f"🖼️ Attached Image: `{scene['image_name']}`")
+        if scene.get("audio_name"):
+            st.caption(f"🎵 Attached Audio: `{scene['audio_name']}`")
+
+        if len(st.session_state["video_scenes"]) > 1:
+            if st.button(f"🗑️ Remove Spot {idx + 1}", key=f"del_spot_{idx}"):
+                st.session_state["video_scenes"].pop(idx)
+                st.rerun()
+
+# Re-number spots cleanly
+for i, s in enumerate(st.session_state["video_scenes"], start=1):
+    s["spot"] = i
+
+# Render & Download Final Video
+st.markdown("### 🎬 Finalize, Preview & Download Video")
+res_choice = st.selectbox("Output Format:", ["Landscape Long-Form (1280x720)", "Vertical Shorts (1080x1920)"])
+
+if st.button("🎥 Render Final Video (.mp4)", type="primary"):
+    with st.status("Rendering your video spots, images, and audio...", expanded=True) as v_status:
+        try:
+            mp4_bytes = render_scenes_to_mp4(st.session_state["video_scenes"], res_choice)
+            st.session_state["rendered_video_bytes"] = mp4_bytes
+            v_status.update(label="Video rendered successfully!", state="complete", expanded=False)
+        except Exception as v_err:
+            v_status.update(label="Video rendering failed", state="error", expanded=True)
+            st.error(f"Could not render video: {v_err}")
+
+if st.session_state.get("rendered_video_bytes"):
+    st.video(st.session_state["rendered_video_bytes"])
+    st.download_button(
+        label="⬇️ Download Final Video (.mp4)",
+        data=st.session_state["rendered_video_bytes"],
+        file_name="youtube_creator_final_video.mp4",
+        mime="video/mp4",
+        type="primary",
     )
 
 # Progress Tracker
