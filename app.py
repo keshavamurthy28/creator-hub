@@ -7,10 +7,11 @@ from google import genai
 st.set_page_config(
     page_title="YouTube Creator Growth Studio",
     page_icon="🎬",
-    layout="wide"
+    layout="wide",
 )
 
-st.markdown("""
+st.markdown(
+    """
     <style>
     .level-header {
         color: #F5C518;
@@ -19,7 +20,9 @@ st.markdown("""
         margin-bottom: 10px;
     }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
 # 2. Sidebar - API Key, Channel Profile & Level Navigation
 with st.sidebar:
@@ -34,14 +37,23 @@ with st.sidebar:
         api_key = st.text_input(
             "Gemini API Key",
             type="password",
-            placeholder="Paste API key or add to Streamlit Secrets"
+            placeholder="Paste API key or add to Streamlit Secrets",
         )
 
     st.divider()
     st.markdown("Customize your channel details below:")
-    channel_topic = st.text_input("Channel Niche / Topic", placeholder="e.g., Personal Finance, Life Wisdom")
-    target_audience = st.text_input("Target Audience", placeholder="e.g., Beginners, Young Professionals")
-    video_format = st.selectbox("Primary Format", ["Long-form Videos", "YouTube Shorts", "Both Long-form & Shorts"])
+    channel_topic = st.text_input(
+        "Channel Niche / Topic",
+        placeholder="e.g., Personal Finance, Life Wisdom",
+    )
+    target_audience = st.text_input(
+        "Target Audience",
+        placeholder="e.g., Beginners, Young Professionals",
+    )
+    video_format = st.selectbox(
+        "Primary Format",
+        ["Long-form Videos", "YouTube Shorts", "Both Long-form & Shorts"],
+    )
 
     st.divider()
 
@@ -54,8 +66,8 @@ with st.sidebar:
             "Level 4: Growth & Algorithm",
             "Level 5: Produce Videos 3x Faster",
             "Level 6: Monetization Plan",
-            "Level 7: Read Analytics Like a Pro"
-        ]
+            "Level 7: Read Analytics Like a Pro",
+        ],
     )
 
 context_addon = ""
@@ -77,7 +89,7 @@ levels_data = {
             "Act as an expert YouTube strategist and monetization consultant. Develop a comprehensive plan for launching a YouTube channel from scratch and working toward monetization.\n"
             "Evaluate my niche, target audience, competitors, available resources, and long-term goals.\n"
             "Create a detailed strategy covering channel positioning, content pillars, video formats, publishing schedules, audience growth, viewer retention, monetization opportunities, and a practical weekly action plan."
-        )
+        ),
     },
     "Level 2: Pick a Niche": {
         "title": "2. Pick a Niche",
@@ -88,7 +100,7 @@ levels_data = {
             "Help me choose a profitable YouTube niche with strong audience demand and long-term growth potential.\n"
             "Evaluate competition, search opportunities, monetization potential, content sustainability, and ways to stand out.\n"
             "Develop a unique channel identity, define my ideal viewer, recommend content categories, and generate 100 video ideas ranked by their potential to attract an audience."
-        )
+        ),
     },
     "Level 3: Viral Scripts, Hooks & Thumbnails": {
         "title": "3. Create Viral Scripts, Hooks, and Thumbnails",
@@ -99,7 +111,7 @@ levels_data = {
             "Develop a complete content creation framework designed to improve click-through rates and audience retention.\n"
             "Generate compelling video ideas, attention-grabbing hooks, engaging titles, thumbnail concepts, opening sequences, storytelling structures, retention strategies, calls to action, and complete video scripts.\n"
             "Explain why each concept could attract viewers, maintain their attention, and encourage them to watch until the end."
-        )
+        ),
     },
     "Level 4: Growth & Algorithm": {
         "title": "4. Understand YouTube Growth and Algorithm",
@@ -109,7 +121,7 @@ levels_data = {
             "Act as a YouTube growth strategist with expertise in content discovery and audience behavior.\n"
             "Explain how YouTube growth works, including impressions, click-through rates, watch time, audience retention, returning viewers, suggested videos, search traffic, and recommendation systems.\n"
             "Build a practical growth strategy covering upload frequency, content testing, performance optimization, audience engagement, and methods for converting viewers into subscribers."
-        )
+        ),
     },
     "Level 5: Produce Videos 3x Faster": {
         "title": "5. Produce Videos 3x Faster",
@@ -120,7 +132,7 @@ levels_data = {
             "Design an AI-assisted workflow that helps me create high-quality YouTube videos more efficiently.\n"
             "Develop streamlined processes for topic research, scriptwriting, voiceovers, filming, editing, thumbnail design, publishing, performance analysis, and repurposing content for YouTube Shorts, TikTok, Instagram Reels, and other platforms.\n"
             "Recommend useful AI tools, repeatable workflows, production templates, and quality-control checklists to reduce unnecessary work while maintaining content quality."
-        )
+        ),
     },
     "Level 6: Monetization Plan": {
         "title": "6. Build Your Monetization Plan",
@@ -131,7 +143,7 @@ levels_data = {
             "Develop a comprehensive revenue strategy for my YouTube channel.\n"
             "Include preparation for the YouTube Partner Program, advertising revenue, affiliate marketing, brand sponsorships, digital products, online courses, paid memberships, newsletters, communities, and additional income opportunities.\n"
             "Explain the requirements, advantages, limitations, and ideal timing for introducing each monetization method as my channel develops."
-        )
+        ),
     },
     "Level 7: Read Analytics Like a Pro": {
         "title": "7. Read Your Analytics Like a Pro",
@@ -143,8 +155,8 @@ levels_data = {
             "Analyze essential metrics, including impressions, click-through rate (CTR), average view duration, audience retention, subscriber conversion, traffic sources, engagement, and revenue.\n"
             "Develop weekly and monthly performance review frameworks to identify successful content patterns, understand why certain videos underperform, and recommend specific improvements.\n"
             "Help me use these insights to make better content decisions and build a more effective long-term growth strategy."
-        )
-    }
+        ),
+    },
 }
 
 # 4. Main Display Area
@@ -163,7 +175,10 @@ extra_details = ""
 st.subheader("🎯 Customize This Level")
 
 if selected_level == "Level 3: Viral Scripts, Hooks & Thumbnails":
-    video_topic = st.text_input("Specific Video Topic for Script/Hook:", placeholder="e.g., 5 Habits That Changed My Life")
+    video_topic = st.text_input(
+        "Specific Video Topic for Script/Hook:",
+        placeholder="e.g., 5 Habits That Changed My Life",
+    )
     if video_topic:
         extra_details = f"\n- Specific Video Topic: {video_topic}"
 
@@ -172,9 +187,12 @@ elif selected_level == "Level 7: Read Analytics Like a Pro":
     ctr = c1.number_input("Current CTR (%)", min_value=0.0, max_value=100.0, value=4.5, step=0.1)
     avd = c2.text_input("Avg View Duration", placeholder="e.g., 3:45 out of 10:00")
     views = c3.number_input("Avg Views per Video", min_value=0, value=500, step=50)
-    extra_details = f"\n- Current Metrics: CTR is {ctr}%, Avg View Duration is {avd or 'N/A'}, Avg Views: {views}"
+    extra_details = (
+        f"\n- Current Metrics: CTR is {ctr}%, "
+        f"Avg View Duration is {avd or 'N/A'}, Avg Views: {views}"
+    )
 
-# 5. Prompt Preview & Live AI Generation (with retry & model fallback)
+# 5. Prompt Preview & Live AI Generation (with retry, model fallback & live status)
 final_prompt = current_data["prompt"] + context_addon + extra_details
 
 with st.expander("📋 View / Copy Raw Prompt"):
@@ -189,11 +207,12 @@ if st.button("🚀 Generate AI Response Now", type="primary"):
         last_error = None
         used_model = None
 
-        with st.spinner("Generating your YouTube strategy with Gemini..."):
+        with st.status("Generating your YouTube strategy with Gemini...", expanded=True) as status:
             client = genai.Client(api_key=api_key)
 
             for model_name in models_to_try:
                 for attempt in range(2):
+                    st.write(f"Trying `{model_name}` (attempt {attempt + 1}/2)...")
                     try:
                         response = client.models.generate_content(
                             model=model_name,
@@ -201,15 +220,24 @@ if st.button("🚀 Generate AI Response Now", type="primary"):
                         )
                         response_text = response.text
                         used_model = model_name
+                        status.update(
+                            label=f"Completed using {model_name}!",
+                            state="complete",
+                            expanded=False,
+                        )
                         break
                     except Exception as e:
                         last_error = e
                         if "503" in str(e) or "UNAVAILABLE" in str(e):
+                            st.write("Model temporarily busy (503). Waiting 2 seconds before retrying...")
                             time.sleep(2)
                             continue
                         break
                 if response_text:
                     break
+
+            if not response_text:
+                status.update(label="Generation failed", state="error", expanded=True)
 
         if response_text:
             st.session_state["last_output"] = response_text
@@ -224,7 +252,7 @@ if "last_output" in st.session_state:
         label="⬇️ Download Response (.md)",
         data=st.session_state["last_output"],
         file_name=f"{selected_level.lower().replace(' ', '_').replace(':', '')}.md",
-        mime="text/markdown"
+        mime="text/markdown",
     )
 
 # Progress Tracker
