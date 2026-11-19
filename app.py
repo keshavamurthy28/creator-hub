@@ -1,10 +1,14 @@
+import math
 import os
+import random
+import struct
 import tempfile
 import textwrap
 import time
+import wave
 from google import genai
 from google.genai import types
-from moviepy import AudioFileClip, CompositeAudioClip, ImageClip, concatenate_videoclips
+from moviepy import AudioFileClip, ImageClip, concatenate_videoclips
 from PIL import Image, ImageDraw, ImageFont
 import streamlit as st
 
@@ -29,6 +33,53 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Market-style selectable presets for each spot
+BACKDROP_PRESETS = {
+    "Midnight Calm (#141824)": "#141824",
+    "Deep Slate Wisdom (#1B2232)": "#1B2232",
+    "Warm Amber Studio (#2A1F14)": "#2A1F14",
+    "Forest Reflection (#12221D)": "#12221D",
+    "Royal Navy (#111936)": "#111936",
+    "Charcoal Minimal (#18181B)": "#18181B",
+}
+
+CHARACTER_PRESETS = [
+    "None (Text & Visual Only)",
+    "Calm Mentor Silhouette",
+    "Thoughtful Reader Avatar",
+    "Minimalist Presenter Badge",
+    "Growth Guide Mascot",
+]
+
+VISUAL_MEDIA_PRESETS = [
+    "Clean Typography Card",
+    "Stock B-Roll Concept: Sunrise & Calm Path",
+    "Stock B-Roll Concept: Journaling & Focus",
+    "Stock B-Roll Concept: City Lights & Reflection",
+    "Chart / Framework Diagram Card",
+]
+
+VIDEO_CLIP_PRESETS = [
+    "Static Scene Frame",
+    "Slow Ken Burns Drift (Simulated Motion)",
+    "Gentle Pulse Zoom (Simulated Motion)",
+]
+
+ANIMATION_PRESETS = [
+    "Fade In Clean",
+    "Slide Up Hook",
+    "Typewriter / Line Reveal",
+    "Soft Pop Emphasis",
+]
+
+SFX_PRESETS = [
+    "None",
+    "Soft Whoosh (Transition)",
+    "Gentle Chime (Insight)",
+    "Warm Bell (Key Takeaway)",
+    "Subtle Pulse (Hook)",
+]
+
 # Initialize session state stores
 if "level_mind_words" not in st.session_state:
     st.session_state["level_mind_words"] = {}
@@ -41,7 +92,13 @@ if "video_scenes" not in st.session_state:
             "title": "Opening Hook",
             "duration": 6,
             "text": "Most beginners stay stuck in life wisdom because they consume advice without applying one habit.",
+            "backdrop_name": "Midnight Calm (#141824)",
             "bg_color": "#141824",
+            "character": "Calm Mentor Silhouette",
+            "visual_preset": "Stock B-Roll Concept: Sunrise & Calm Path",
+            "video_preset": "Slow Ken Burns Drift (Simulated Motion)",
+            "animation": "Slide Up Hook",
+            "sfx": "Subtle Pulse (Hook)",
             "image_bytes": None,
             "image_name": None,
             "audio_bytes": None,
@@ -53,7 +110,13 @@ if "video_scenes" not in st.session_state:
             "title": "Core Lesson",
             "duration": 8,
             "text": "Pick one practical mindset shift this week, test it daily, and track what actually changes.",
+            "backdrop_name": "Deep Slate Wisdom (#1B2232)",
             "bg_color": "#1B2232",
+            "character": "Thoughtful Reader Avatar",
+            "visual_preset": "Stock B-Roll Concept: Journaling & Focus",
+            "video_preset": "Gentle Pulse Zoom (Simulated Motion)",
+            "animation": "Fade In Clean",
+            "sfx": "Gentle Chime (Insight)",
             "image_bytes": None,
             "image_name": None,
             "audio_bytes": None,
@@ -270,36 +333,100 @@ def hex_to_rgb(hex_str: str):
     return tuple(int(cleaned[i : i + 2], 16) for i in (0, 2, 4))
 
 
+def synthesize_sfx_wav(sfx_choice: str, out_wav_path: str) -> bool:
+    if not sfx_choice or sfx_choice == "None":
+        return False
+
+    sample_rate = 22050
+    duration = 0.65
+    num_samples = int(sample_rate * duration)
+
+    with wave.open(out_wav_path, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+
+        frames = bytearray()
+        for i in range(num_samples):
+            t = i / sample_rate
+            env = math.sin(math.pi * min(1.0, t / duration))
+
+            if "Whoosh" in sfx_choice:
+                freq = 180 + 420 * (t / duration)
+                val = env * (0.45 * math.sin(2 * math.pi * freq * t) + 0.25 * random.uniform(-1, 1))
+            elif "Chime" in sfx_choice:
+                val = env * (0.45 * math.sin(2 * math.pi * 587.33 * t) + 0.25 * math.sin(2 * math.pi * 880.0 * t))
+            elif "Bell" in sfx_choice:
+                decay = math.exp(-3.5 * t)
+                val = decay * (0.5 * math.sin(2 * math.pi * 440.0 * t) + 0.2 * math.sin(2 * math.pi * 1318.5 * t))
+            else:  # Subtle Pulse
+                val = env * 0.4 * math.sin(2 * math.pi * 220.0 * t)
+
+            sample_int = max(-32767, min(32767, int(val * 32767)))
+            frames.extend(struct.pack("<h", sample_int))
+
+        wf.writeframes(frames)
+    return True
+
+
+def draw_character_badge(draw: ImageDraw.Draw, character_name: str, width: int, height: int, font):
+    if not character_name or character_name.startswith("None"):
+        return
+
+    cx = width - 170
+    cy = int(height * 0.36)
+    r = 68
+
+    # Character circle + head/shoulders icon silhouette
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(245, 197, 24), outline=(255, 255, 255), width=3)
+    draw.ellipse((cx - 22, cy - 34, cx + 22, cy + 10), fill=(20, 24, 36))
+    draw.pieslice((cx - 44, cy + 8, cx + 44, cy + 86), start=180, end=360, fill=(20, 24, 36))
+    draw.text((cx - 85, cy + r + 10), character_name[:28], fill=(245, 197, 24), font=font)
+
+
 def create_scene_frame_image(scene: dict, width: int, height: int, temp_dir: str) -> str:
     bg_rgb = hex_to_rgb(scene.get("bg_color", "#141824"))
     canvas = Image.new("RGB", (width, height), bg_rgb)
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+
+    # Subtle top bar showing selected visual/video/animation presets
+    visual_tag = scene.get("visual_preset", "Clean Typography Card")
+    anim_tag = scene.get("animation", "Fade In Clean")
+    spot_label = f"Spot {scene['spot']} — {scene.get('title', 'Scene')} | {anim_tag}"
+    draw.text((60, 36), spot_label, fill=(245, 197, 24), font=font)
+    draw.text((60, 56), f"Visual Style: {visual_tag}", fill=(180, 190, 210), font=font)
 
     if scene.get("image_bytes"):
         img_path = os.path.join(temp_dir, f"src_img_{scene['spot']}.png")
         with open(img_path, "wb") as f:
             f.write(scene["image_bytes"])
         uploaded_img = Image.open(img_path).convert("RGB")
-        # Fit uploaded image nicely in upper/center area
-        max_w = int(width * 0.78)
-        max_h = int(height * 0.48)
+        max_w = int(width * 0.65)
+        max_h = int(height * 0.44)
         uploaded_img.thumbnail((max_w, max_h))
-        x_pos = (width - uploaded_img.width) // 2
-        y_pos = int(height * 0.14)
+        x_pos = (width - uploaded_img.width) // 2 - (70 if scene.get("character", "").startswith("None") is False else 0)
+        x_pos = max(60, x_pos)
+        y_pos = 95
         canvas.paste(uploaded_img, (x_pos, y_pos))
-        text_y_start = y_pos + uploaded_img.height + 36
+        text_y_start = y_pos + uploaded_img.height + 28
     else:
-        text_y_start = int(height * 0.28)
+        # Decorative accent frame when no custom image is uploaded
+        box_top = 95
+        box_bottom = int(height * 0.45)
+        box_right = width - (270 if not scene.get("character", "").startswith("None") else 60)
+        draw.rectangle((60, box_top, max(260, box_right), box_bottom), outline=(245, 197, 24), width=2)
+        draw.text((80, box_top + 18), f"Media Preset: {visual_tag}", fill=(245, 197, 24), font=font)
+        draw.text((80, box_top + 42), f"Motion: {scene.get('video_preset', 'Static Scene Frame')}", fill=(210, 215, 225), font=font)
+        text_y_start = box_bottom + 28
 
-    draw = ImageDraw.Draw(canvas)
-    font = ImageFont.load_default()
+    draw_character_badge(draw, scene.get("character", ""), width, height, font)
 
-    spot_label = f"Spot {scene['spot']} — {scene.get('title', 'Scene')}"
-    draw.text((60, 40), spot_label, fill=(245, 197, 24), font=font)
-
-    wrapped_lines = textwrap.wrap(scene.get("text", ""), width=55)
+    wrap_width = 68 if width >= 1200 else 48
+    wrapped_lines = textwrap.wrap(scene.get("text", ""), width=wrap_width)
     cur_y = text_y_start
     for line in wrapped_lines[:10]:
-        if cur_y > height - 60:
+        if cur_y > height - 50:
             break
         draw.text((60, cur_y), line, fill=(245, 245, 245), font=font)
         cur_y += 22
@@ -322,13 +449,27 @@ def render_scenes_to_mp4(scenes: list, resolution_choice: str) -> bytes:
             frame_file = create_scene_frame_image(scene, w, h, tmpdir)
             img_clip = ImageClip(frame_file).with_duration(dur)
 
+            # Optional simulated motion from video_preset
+            v_preset = scene.get("video_preset", "")
+            if "Ken Burns" in v_preset:
+                img_clip = img_clip.resized(lambda t: 1.0 + 0.015 * t)
+            elif "Pulse Zoom" in v_preset:
+                img_clip = img_clip.resized(lambda t: 1.0 + 0.02 * math.sin(math.pi * min(1.0, t / dur)))
+
+            chosen_audio_path = None
             if scene.get("audio_bytes"):
                 ext = ".wav" if (scene.get("audio_name") or "").lower().endswith(".wav") else ".mp3"
-                aud_path = os.path.join(tmpdir, f"audio_spot_{scene['spot']}{ext}")
-                with open(aud_path, "wb") as af:
+                chosen_audio_path = os.path.join(tmpdir, f"audio_spot_{scene['spot']}{ext}")
+                with open(chosen_audio_path, "wb") as af:
                     af.write(scene["audio_bytes"])
+            else:
+                sfx_wav = os.path.join(tmpdir, f"sfx_spot_{scene['spot']}.wav")
+                if synthesize_sfx_wav(scene.get("sfx", "None"), sfx_wav):
+                    chosen_audio_path = sfx_wav
+
+            if chosen_audio_path:
                 try:
-                    aud_clip = AudioFileClip(aud_path)
+                    aud_clip = AudioFileClip(chosen_audio_path)
                     vol = float(scene.get("audio_volume", 0.6))
                     aud_clip = aud_clip.with_volume_scaled(vol)
                     if aud_clip.duration > dur:
@@ -341,7 +482,7 @@ def render_scenes_to_mp4(scenes: list, resolution_choice: str) -> bytes:
 
         final_video = concatenate_videoclips(clips, method="compose")
         out_mp4 = os.path.join(tmpdir, "final_youtube_video.mp4")
-        has_audio = any(s.get("audio_bytes") for s in scenes)
+        has_audio = any(s.get("audio_bytes") or (s.get("sfx") and s.get("sfx") != "None") for s in scenes)
         final_video.write_videofile(
             out_mp4,
             fps=24,
@@ -358,6 +499,53 @@ def render_scenes_to_mp4(scenes: list, resolution_choice: str) -> bytes:
             c.close()
 
         return mp4_data
+
+
+def build_auto_draft_scenes(draft_text: str, source_label: str) -> list:
+    clean_lines = [
+        line.strip().lstrip("#*-0123456789. ").strip()
+        for line in draft_text.splitlines()
+        if len(line.strip()) > 35 and not line.strip().startswith("---")
+    ]
+    if not clean_lines:
+        clean_lines = [
+            "Start with a relatable beginner struggle in the first 30 seconds.",
+            "Share one simple life wisdom habit that creates calm and clarity.",
+            "Give a clear step-by-step action viewers can try today.",
+        ]
+
+    picked = clean_lines[:4]
+    backdrop_cycle = list(BACKDROP_PRESETS.keys())
+    char_cycle = CHARACTER_PRESETS[1:]
+    vis_cycle = VISUAL_MEDIA_PRESETS
+    vid_cycle = VIDEO_CLIP_PRESETS
+    anim_cycle = ANIMATION_PRESETS
+    sfx_cycle = SFX_PRESETS[1:]
+
+    built = []
+    for idx, line in enumerate(picked, start=1):
+        b_name = backdrop_cycle[(idx - 1) % len(backdrop_cycle)]
+        built.append(
+            {
+                "spot": idx,
+                "title": f"Auto Spot {idx} ({source_label.split(':')[0]})",
+                "duration": 7,
+                "text": line[:320],
+                "backdrop_name": b_name,
+                "bg_color": BACKDROP_PRESETS[b_name],
+                "character": char_cycle[(idx - 1) % len(char_cycle)],
+                "visual_preset": vis_cycle[(idx - 1) % len(vis_cycle)],
+                "video_preset": vid_cycle[(idx - 1) % len(vid_cycle)],
+                "animation": anim_cycle[(idx - 1) % len(anim_cycle)],
+                "sfx": sfx_cycle[(idx - 1) % len(sfx_cycle)],
+                "image_bytes": None,
+                "image_name": None,
+                "audio_bytes": None,
+                "audio_name": None,
+                "audio_volume": 0.6,
+            }
+        )
+    return built
 
 
 # 4. Main Display Area
@@ -507,9 +695,9 @@ if "last_output" in st.session_state:
         mime="text/markdown",
     )
 
-# 7. Filter, Select, Edit & Assemble Video Spots
+# 7. Filter, Select, Edit & Assemble Video Spots with Market Presets
 st.divider()
-st.subheader("🎞️ Video Scene & Media Studio (Filter, Edit, Insert Media & Export .mp4)")
+st.subheader("🎞️ Video Scene & Media Studio (Filter, Select Presets, Edit & Export .mp4)")
 
 available_levels = list(all_outputs.keys())
 if available_levels:
@@ -526,20 +714,34 @@ if available_levels:
     ]
 
     if filtered_levels:
-        chosen_source_level = st.selectbox("Select Generated Level to Inspect or Split into Spots:", filtered_levels)
+        chosen_source_level = st.selectbox("Select Generated Level to Inspect or Build Video From:", filtered_levels)
         source_text = all_outputs[chosen_source_level]["content"]
         st.text_area("Editable Source Draft (Edit text before turning into spots):", value=source_text, height=160, key="editable_source_draft")
 
-        split_col1, split_col2 = st.columns(2)
-        if split_col1.button("➕ Add New Spot at End"):
+        a_col1, a_col2, a_col3 = st.columns(3)
+        if a_col1.button("✨ Auto-Build Best Draft Spots", type="primary", use_container_width=True):
+            st.session_state["video_scenes"] = build_auto_draft_scenes(
+                st.session_state.get("editable_source_draft", source_text),
+                chosen_source_level,
+            )
+            st.rerun()
+
+        if a_col2.button("➕ Add New Spot at End", use_container_width=True):
             next_spot_num = len(st.session_state["video_scenes"]) + 1
+            default_bg = list(BACKDROP_PRESETS.keys())[0]
             st.session_state["video_scenes"].append(
                 {
                     "spot": next_spot_num,
                     "title": f"Spot {next_spot_num}",
                     "duration": 6,
                     "text": st.session_state.get("editable_source_draft", "")[:240],
-                    "bg_color": "#141824",
+                    "backdrop_name": default_bg,
+                    "bg_color": BACKDROP_PRESETS[default_bg],
+                    "character": CHARACTER_PRESETS[0],
+                    "visual_preset": VISUAL_MEDIA_PRESETS[0],
+                    "video_preset": VIDEO_CLIP_PRESETS[0],
+                    "animation": ANIMATION_PRESETS[0],
+                    "sfx": SFX_PRESETS[0],
                     "image_bytes": None,
                     "image_name": None,
                     "audio_bytes": None,
@@ -549,19 +751,27 @@ if available_levels:
             )
             st.rerun()
 
-        if split_col2.button("✂️ Auto-Create 3 Spots from Editable Draft"):
+        if a_col3.button("✂️ Split Draft into 3 Spots", use_container_width=True):
             raw_draft = st.session_state.get("editable_source_draft", "").strip()
             chunks = [p.strip() for p in raw_draft.split("\n\n") if p.strip()]
             picked_chunks = chunks[:3] if len(chunks) >= 3 else (raw_draft or "Life wisdom point").split(". ")[:3]
             new_scenes = []
+            bg_list = list(BACKDROP_PRESETS.keys())
             for idx, part in enumerate(picked_chunks, start=1):
+                b_name = bg_list[(idx - 1) % len(bg_list)]
                 new_scenes.append(
                     {
                         "spot": idx,
                         "title": f"Scene {idx} ({chosen_source_level.split(':')[0]})",
                         "duration": 7,
                         "text": part[:350],
-                        "bg_color": "#141824" if idx % 2 == 1 else "#1D2436",
+                        "backdrop_name": b_name,
+                        "bg_color": BACKDROP_PRESETS[b_name],
+                        "character": CHARACTER_PRESETS[idx % len(CHARACTER_PRESETS)],
+                        "visual_preset": VISUAL_MEDIA_PRESETS[idx % len(VISUAL_MEDIA_PRESETS)],
+                        "video_preset": VIDEO_CLIP_PRESETS[idx % len(VIDEO_CLIP_PRESETS)],
+                        "animation": ANIMATION_PRESETS[idx % len(ANIMATION_PRESETS)],
+                        "sfx": SFX_PRESETS[idx % len(SFX_PRESETS)],
                         "image_bytes": None,
                         "image_name": None,
                         "audio_bytes": None,
@@ -576,35 +786,70 @@ if available_levels:
         st.warning("No generated levels match your filter keyword.")
 else:
     st.info("Generate at least one level above to filter and pull text into video spots—or edit your starter spots directly below.")
+    if st.button("✨ Auto-Build Starter Spots from Channel Topic"):
+        sample_draft = (
+            f"Why {target_audience or 'beginners'} struggle with {channel_topic or 'life wisdom'} at first.\n\n"
+            f"A simple daily habit to apply {channel_topic or 'life wisdom'} without overwhelm.\n\n"
+            "Your small action step for this week."
+        )
+        st.session_state["video_scenes"] = build_auto_draft_scenes(sample_draft, selected_level)
+        st.rerun()
 
-# Spot-by-Spot Editor (Text, Image & Audio/Song/SFX at Specific Spots)
-st.markdown("### 🧩 Spot-by-Spot Timeline Editor")
+# Spot-by-Spot Editor with Selectable Presets + Custom Uploads
+st.markdown("### 🧩 Spot-by-Spot Timeline Editor (Presets & Custom Media)")
 for idx, scene in enumerate(st.session_state["video_scenes"]):
-    with st.expander(f"Spot {idx + 1}: {scene.get('title', 'Scene')} ({scene.get('duration', 6)}s)", expanded=(idx == 0)):
+    with st.expander(
+        f"Spot {idx + 1}: {scene.get('title', 'Scene')} ({scene.get('duration', 6)}s) — {scene.get('sfx', 'None')}",
+        expanded=(idx == 0),
+    ):
         sc1, sc2, sc3 = st.columns([2, 1, 1])
         scene["title"] = sc1.text_input("Spot Label", value=scene.get("title", f"Spot {idx + 1}"), key=f"spot_title_{idx}")
         scene["duration"] = sc2.number_input("Duration (sec)", min_value=2, max_value=60, value=int(scene.get("duration", 6)), key=f"spot_dur_{idx}")
-        scene["bg_color"] = sc3.text_input("Background Hex", value=scene.get("bg_color", "#141824"), key=f"spot_bg_{idx}")
+
+        b_keys = list(BACKDROP_PRESETS.keys())
+        cur_b = scene.get("backdrop_name", b_keys[0])
+        b_idx = b_keys.index(cur_b) if cur_b in b_keys else 0
+        chosen_backdrop = sc3.selectbox("Backdrop Preset", b_keys, index=b_idx, key=f"spot_backdrop_{idx}")
+        scene["backdrop_name"] = chosen_backdrop
+        scene["bg_color"] = BACKDROP_PRESETS[chosen_backdrop]
+
+        p1, p2, p3, p4 = st.columns(4)
+        c_idx = CHARACTER_PRESETS.index(scene["character"]) if scene.get("character") in CHARACTER_PRESETS else 0
+        scene["character"] = p1.selectbox("Character Preset", CHARACTER_PRESETS, index=c_idx, key=f"spot_char_{idx}")
+
+        vis_idx = VISUAL_MEDIA_PRESETS.index(scene["visual_preset"]) if scene.get("visual_preset") in VISUAL_MEDIA_PRESETS else 0
+        scene["visual_preset"] = p2.selectbox("Image / Visual Preset", VISUAL_MEDIA_PRESETS, index=vis_idx, key=f"spot_vis_{idx}")
+
+        vid_idx = VIDEO_CLIP_PRESETS.index(scene["video_preset"]) if scene.get("video_preset") in VIDEO_CLIP_PRESETS else 0
+        scene["video_preset"] = p3.selectbox("Video / Motion Preset", VIDEO_CLIP_PRESETS, index=vid_idx, key=f"spot_vid_{idx}")
+
+        anim_idx = ANIMATION_PRESETS.index(scene["animation"]) if scene.get("animation") in ANIMATION_PRESETS else 0
+        scene["animation"] = p4.selectbox("Animation Preset", ANIMATION_PRESETS, index=anim_idx, key=f"spot_anim_{idx}")
 
         scene["text"] = st.text_area("On-Screen / Narration Text for This Spot", value=scene.get("text", ""), height=90, key=f"spot_text_{idx}")
 
-        m1, m2, m3 = st.columns([2, 2, 1])
-        img_file = m1.file_uploader(f"Insert Image at Spot {idx + 1}", type=["png", "jpg", "jpeg"], key=f"spot_img_{idx}")
+        m1, m2, m3, m4 = st.columns([2, 2, 2, 1])
+        sfx_idx = SFX_PRESETS.index(scene["sfx"]) if scene.get("sfx") in SFX_PRESETS else 0
+        scene["sfx"] = m1.selectbox("Sound Effect Preset", SFX_PRESETS, index=sfx_idx, key=f"spot_sfx_{idx}")
+
+        img_file = m2.file_uploader(f"Custom Image (Spot {idx + 1})", type=["png", "jpg", "jpeg"], key=f"spot_img_{idx}")
         if img_file is not None:
             scene["image_bytes"] = img_file.getvalue()
             scene["image_name"] = img_file.name
 
-        aud_file = m2.file_uploader(f"Insert Song / Sound / Voice at Spot {idx + 1}", type=["mp3", "wav", "m4a"], key=f"spot_aud_{idx}")
+        aud_file = m3.file_uploader(f"Custom Song / Audio (Spot {idx + 1})", type=["mp3", "wav", "m4a"], key=f"spot_aud_{idx}")
         if aud_file is not None:
             scene["audio_bytes"] = aud_file.getvalue()
             scene["audio_name"] = aud_file.name
 
-        scene["audio_volume"] = m3.slider("Audio Vol", min_value=0.0, max_value=1.5, value=float(scene.get("audio_volume", 0.6)), step=0.1, key=f"spot_vol_{idx}")
+        scene["audio_volume"] = m4.slider("Audio Vol", min_value=0.0, max_value=1.5, value=float(scene.get("audio_volume", 0.6)), step=0.1, key=f"spot_vol_{idx}")
 
         if scene.get("image_name"):
-            st.caption(f"🖼️ Attached Image: `{scene['image_name']}`")
+            st.caption(f"🖼️ Custom Image: `{scene['image_name']}`")
         if scene.get("audio_name"):
-            st.caption(f"🎵 Attached Audio: `{scene['audio_name']}`")
+            st.caption(f"🎵 Custom Audio: `{scene['audio_name']}`")
+        elif scene.get("sfx") and scene.get("sfx") != "None":
+            st.caption(f"🔊 Built-in SFX Selected: `{scene['sfx']}`")
 
         if len(st.session_state["video_scenes"]) > 1:
             if st.button(f"🗑️ Remove Spot {idx + 1}", key=f"del_spot_{idx}"):
@@ -620,7 +865,7 @@ st.markdown("### 🎬 Finalize, Preview & Download Video")
 res_choice = st.selectbox("Output Format:", ["Landscape Long-Form (1280x720)", "Vertical Shorts (1080x1920)"])
 
 if st.button("🎥 Render Final Video (.mp4)", type="primary"):
-    with st.status("Rendering your video spots, images, and audio...", expanded=True) as v_status:
+    with st.status("Rendering your video spots, presets, images, and audio...", expanded=True) as v_status:
         try:
             mp4_bytes = render_scenes_to_mp4(st.session_state["video_scenes"], res_choice)
             st.session_state["rendered_video_bytes"] = mp4_bytes
