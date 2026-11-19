@@ -1,3 +1,5 @@
+import asyncio
+import io
 import math
 import os
 import random
@@ -8,9 +10,16 @@ import time
 import wave
 from google import genai
 from google.genai import types
-from moviepy import AudioFileClip, ImageClip, concatenate_videoclips
+from gtts import gTTS
+from moviepy import AudioFileClip, CompositeAudioClip, ImageClip, concatenate_videoclips
 from PIL import Image, ImageDraw, ImageFont
 import streamlit as st
+
+try:
+    import edge_tts
+    HAS_EDGE_TTS = True
+except Exception:
+    HAS_EDGE_TTS = False
 
 # 1. Page Configuration
 st.set_page_config(
@@ -33,7 +42,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Market-style selectable presets for each spot
+# Market-style selectable studio presets
 BACKDROP_PRESETS = {
     "Midnight Calm (#141824)": "#141824",
     "Deep Slate Wisdom (#1B2232)": "#1B2232",
@@ -43,13 +52,54 @@ BACKDROP_PRESETS = {
     "Charcoal Minimal (#18181B)": "#18181B",
 }
 
-CHARACTER_PRESETS = [
-    "None (Text & Visual Only)",
-    "Calm Mentor Silhouette",
-    "Thoughtful Reader Avatar",
-    "Minimalist Presenter Badge",
-    "Growth Guide Mascot",
+ANIMATED_CHARACTER_PRESETS = {
+    "None (No Character)": {
+        "badge": "",
+        "accent": (245, 197, 24),
+        "outfit": (40, 46, 62),
+        "default_voice": "en-US-ChristopherNeural",
+    },
+    "Calm Mentor (Animated)": {
+        "badge": "MENTOR",
+        "accent": (245, 197, 24),
+        "outfit": (36, 68, 110),
+        "default_voice": "en-US-ChristopherNeural",
+    },
+    "Wise Guide (Animated)": {
+        "badge": "GUIDE",
+        "accent": (120, 210, 170),
+        "outfit": (28, 74, 62),
+        "default_voice": "en-IN-PrabhatNeural",
+    },
+    "Energetic Host (Animated)": {
+        "badge": "HOST",
+        "accent": (255, 138, 76),
+        "outfit": (115, 42, 42),
+        "default_voice": "en-US-GuyNeural",
+    },
+    "Thoughtful Thinker (Animated)": {
+        "badge": "THINKER",
+        "accent": (155, 180, 255),
+        "outfit": (58, 48, 96),
+        "default_voice": "en-US-AriaNeural",
+    },
+}
+
+CHARACTER_MOTION_PRESETS = [
+    "Idle Breathing & Bobbing",
+    "Speaking Mouth/Ring Pulse",
+    "Gentle Float & Drift",
+    "Static Pose",
 ]
+
+DUBBING_VOICE_PRESETS = {
+    "Calm Mentor — Christopher (US Male)": "en-US-ChristopherNeural",
+    "Thoughtful Thinker — Aria (US Female)": "en-US-AriaNeural",
+    "Energetic Host — Guy (US Male)": "en-US-GuyNeural",
+    "Friendly Narrator — Jenny (US Female)": "en-US-JennyNeural",
+    "Warm Indian Male — Prabhat (IN Male)": "en-IN-PrabhatNeural",
+    "Warm Indian Female — Neerja (IN Female)": "en-IN-NeerjaNeural",
+}
 
 VISUAL_MEDIA_PRESETS = [
     "Clean Typography Card",
@@ -90,11 +140,16 @@ if "video_scenes" not in st.session_state:
         {
             "spot": 1,
             "title": "Opening Hook",
-            "duration": 6,
+            "duration": 7,
             "text": "Most beginners stay stuck in life wisdom because they consume advice without applying one habit.",
             "backdrop_name": "Midnight Calm (#141824)",
             "bg_color": "#141824",
-            "character": "Calm Mentor Silhouette",
+            "character": "Calm Mentor (Animated)",
+            "char_motion": "Speaking Mouth/Ring Pulse",
+            "enable_dubbing": True,
+            "dub_voice_label": "Calm Mentor — Christopher (US Male)",
+            "dub_rate": "+0%",
+            "dub_audio_bytes": None,
             "visual_preset": "Stock B-Roll Concept: Sunrise & Calm Path",
             "video_preset": "Slow Ken Burns Drift (Simulated Motion)",
             "animation": "Slide Up Hook",
@@ -103,7 +158,7 @@ if "video_scenes" not in st.session_state:
             "image_name": None,
             "audio_bytes": None,
             "audio_name": None,
-            "audio_volume": 0.6,
+            "audio_volume": 0.85,
         },
         {
             "spot": 2,
@@ -112,7 +167,12 @@ if "video_scenes" not in st.session_state:
             "text": "Pick one practical mindset shift this week, test it daily, and track what actually changes.",
             "backdrop_name": "Deep Slate Wisdom (#1B2232)",
             "bg_color": "#1B2232",
-            "character": "Thoughtful Reader Avatar",
+            "character": "Thoughtful Thinker (Animated)",
+            "char_motion": "Idle Breathing & Bobbing",
+            "enable_dubbing": True,
+            "dub_voice_label": "Thoughtful Thinker — Aria (US Female)",
+            "dub_rate": "+0%",
+            "dub_audio_bytes": None,
             "visual_preset": "Stock B-Roll Concept: Journaling & Focus",
             "video_preset": "Gentle Pulse Zoom (Simulated Motion)",
             "animation": "Fade In Clean",
@@ -121,7 +181,7 @@ if "video_scenes" not in st.session_state:
             "image_name": None,
             "audio_bytes": None,
             "audio_name": None,
-            "audio_volume": 0.6,
+            "audio_volume": 0.85,
         },
     ]
 if "rendered_video_bytes" not in st.session_state:
@@ -333,6 +393,39 @@ def hex_to_rgb(hex_str: str):
     return tuple(int(cleaned[i : i + 2], 16) for i in (0, 2, 4))
 
 
+async def _edge_tts_to_bytes(text: str, voice: str, rate: str) -> bytes:
+    communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+    buf = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    return buf.getvalue()
+
+
+def synthesize_character_dubbing(text: str, voice_code: str, rate: str = "+0%") -> bytes:
+    cleaned_text = " ".join(text.strip().split())
+    if not cleaned_text:
+        return b""
+
+    if HAS_EDGE_TTS:
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                audio_bytes = loop.run_until_complete(_edge_tts_to_bytes(cleaned_text, voice_code, rate))
+            finally:
+                loop.close()
+            if audio_bytes:
+                return audio_bytes
+        except Exception:
+            pass
+
+    # Fallback to gTTS if edge-tts is unavailable or blocked
+    tts = gTTS(text=cleaned_text, lang="en")
+    out_buf = io.BytesIO()
+    tts.write_to_fp(out_buf)
+    return out_buf.getvalue()
+
+
 def synthesize_sfx_wav(sfx_choice: str, out_wav_path: str) -> bool:
     if not sfx_choice or sfx_choice == "None":
         return False
@@ -359,7 +452,7 @@ def synthesize_sfx_wav(sfx_choice: str, out_wav_path: str) -> bool:
             elif "Bell" in sfx_choice:
                 decay = math.exp(-3.5 * t)
                 val = decay * (0.5 * math.sin(2 * math.pi * 440.0 * t) + 0.2 * math.sin(2 * math.pi * 1318.5 * t))
-            else:  # Subtle Pulse
+            else:
                 val = env * 0.4 * math.sin(2 * math.pi * 220.0 * t)
 
             sample_int = max(-32767, min(32767, int(val * 32767)))
@@ -369,58 +462,89 @@ def synthesize_sfx_wav(sfx_choice: str, out_wav_path: str) -> bool:
     return True
 
 
-def draw_character_badge(draw: ImageDraw.Draw, character_name: str, width: int, height: int, font):
-    if not character_name or character_name.startswith("None"):
-        return
-
-    cx = width - 170
-    cy = int(height * 0.36)
-    r = 68
-
-    # Character circle + head/shoulders icon silhouette
-    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(245, 197, 24), outline=(255, 255, 255), width=3)
-    draw.ellipse((cx - 22, cy - 34, cx + 22, cy + 10), fill=(20, 24, 36))
-    draw.pieslice((cx - 44, cy + 8, cx + 44, cy + 86), start=180, end=360, fill=(20, 24, 36))
-    draw.text((cx - 85, cy + r + 10), character_name[:28], fill=(245, 197, 24), font=font)
-
-
-def create_scene_frame_image(scene: dict, width: int, height: int, temp_dir: str) -> str:
+def create_scene_frame_image(
+    scene: dict,
+    width: int,
+    height: int,
+    temp_dir: str,
+    t_sec: float = 0.0,
+    src_img_path: str | None = None,
+    frame_idx: int = 0,
+) -> str:
     bg_rgb = hex_to_rgb(scene.get("bg_color", "#141824"))
     canvas = Image.new("RGB", (width, height), bg_rgb)
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
 
-    # Subtle top bar showing selected visual/video/animation presets
+    char_name = scene.get("character", "None (No Character)")
+    char_info = ANIMATED_CHARACTER_PRESETS.get(char_name, ANIMATED_CHARACTER_PRESETS["None (No Character)"])
+    has_character = char_name != "None (No Character)"
+
     visual_tag = scene.get("visual_preset", "Clean Typography Card")
     anim_tag = scene.get("animation", "Fade In Clean")
     spot_label = f"Spot {scene['spot']} — {scene.get('title', 'Scene')} | {anim_tag}"
     draw.text((60, 36), spot_label, fill=(245, 197, 24), font=font)
-    draw.text((60, 56), f"Visual Style: {visual_tag}", fill=(180, 190, 210), font=font)
+    draw.text((60, 56), f"Visual: {visual_tag} | Character: {char_name}", fill=(180, 190, 210), font=font)
 
-    if scene.get("image_bytes"):
-        img_path = os.path.join(temp_dir, f"src_img_{scene['spot']}.png")
-        with open(img_path, "wb") as f:
-            f.write(scene["image_bytes"])
-        uploaded_img = Image.open(img_path).convert("RGB")
-        max_w = int(width * 0.65)
+    if src_img_path and os.path.exists(src_img_path):
+        uploaded_img = Image.open(src_img_path).convert("RGB")
+        max_w = int(width * 0.62)
         max_h = int(height * 0.44)
         uploaded_img.thumbnail((max_w, max_h))
-        x_pos = (width - uploaded_img.width) // 2 - (70 if scene.get("character", "").startswith("None") is False else 0)
+        x_pos = (width - uploaded_img.width) // 2 - (95 if has_character else 0)
         x_pos = max(60, x_pos)
         y_pos = 95
         canvas.paste(uploaded_img, (x_pos, y_pos))
         text_y_start = y_pos + uploaded_img.height + 28
     else:
-        # Decorative accent frame when no custom image is uploaded
         box_top = 95
         box_bottom = int(height * 0.45)
-        box_right = width - (270 if not scene.get("character", "").startswith("None") else 60)
+        box_right = width - (290 if has_character else 60)
         draw.rectangle((60, box_top, max(260, box_right), box_bottom), outline=(245, 197, 24), width=2)
         draw.text((80, box_top + 18), f"Media Preset: {visual_tag}", fill=(245, 197, 24), font=font)
         draw.text((80, box_top + 42), f"Motion: {scene.get('video_preset', 'Static Scene Frame')}", fill=(210, 215, 225), font=font)
         text_y_start = box_bottom + 28
 
-    draw_character_badge(draw, scene.get("character", ""), width, height, font)
+    # Draw animated character avatar if enabled
+    if has_character:
+        motion_mode = scene.get("char_motion", "Idle Breathing & Bobbing")
+        bob_y = 0
+        drift_x = 0
+        mouth_open = False
+
+        if "Bobbing" in motion_mode:
+            bob_y = int(10 * math.sin(2 * math.pi * 1.4 * t_sec))
+        elif "Pulse" in motion_mode:
+            bob_y = int(5 * math.sin(2 * math.pi * 2.0 * t_sec))
+            mouth_open = math.sin(2 * math.pi * 4.5 * t_sec) > 0.1
+        elif "Float" in motion_mode:
+            bob_y = int(8 * math.sin(2 * math.pi * 1.1 * t_sec))
+            drift_x = int(12 * math.cos(2 * math.pi * 0.7 * t_sec))
+
+        cx = width - 175 + drift_x
+        cy = int(height * 0.36) + bob_y
+        r = 72
+        accent_rgb = char_info["accent"]
+        outfit_rgb = char_info["outfit"]
+
+        # Outer pulse ring when speaking
+        if mouth_open:
+            draw.ellipse((cx - r - 10, cy - r - 10, cx + r + 10, cy + r + 10), outline=accent_rgb, width=3)
+
+        # Shoulders / outfit
+        draw.pieslice((cx - r, cy + 12, cx + r, cy + r + 48), start=180, end=360, fill=outfit_rgb, outline=accent_rgb, width=2)
+        # Head
+        draw.ellipse((cx - 42, cy - 52, cx + 42, cy + 32), fill=accent_rgb, outline=(255, 255, 255), width=2)
+        # Eyes
+        draw.ellipse((cx - 20, cy - 18, cx - 8, cy - 6), fill=(20, 24, 36))
+        draw.ellipse((cx + 8, cy - 18, cx + 20, cy - 6), fill=(20, 24, 36))
+        # Animated mouth
+        if mouth_open:
+            draw.ellipse((cx - 10, cy + 6, cx + 10, cy + 20), fill=(20, 24, 36))
+        else:
+            draw.line((cx - 12, cy + 12, cx + 12, cy + 12), fill=(20, 24, 36), width=3)
+
+        draw.text((cx - 65, cy + r + 24), f"{char_info['badge']} ({motion_mode.split()[0]})", fill=accent_rgb, font=font)
 
     wrap_width = 68 if width >= 1200 else 48
     wrapped_lines = textwrap.wrap(scene.get("text", ""), width=wrap_width)
@@ -431,7 +555,7 @@ def create_scene_frame_image(scene: dict, width: int, height: int, temp_dir: str
         draw.text((60, cur_y), line, fill=(245, 245, 245), font=font)
         cur_y += 22
 
-    out_frame_path = os.path.join(temp_dir, f"frame_spot_{scene['spot']}.png")
+    out_frame_path = os.path.join(temp_dir, f"frame_spot_{scene['spot']}_{frame_idx}.png")
     canvas.save(out_frame_path)
     return out_frame_path
 
@@ -446,43 +570,126 @@ def render_scenes_to_mp4(scenes: list, resolution_choice: str) -> bytes:
     with tempfile.TemporaryDirectory() as tmpdir:
         for scene in scenes:
             dur = max(2, int(scene.get("duration", 6)))
-            frame_file = create_scene_frame_image(scene, w, h, tmpdir)
-            img_clip = ImageClip(frame_file).with_duration(dur)
+            char_name = scene.get("character", "None (No Character)")
+            motion_mode = scene.get("char_motion", "Idle Breathing & Bobbing")
+            has_animated_char = (char_name != "None (No Character)") and ("Static" not in motion_mode)
 
-            # Optional simulated motion from video_preset
+            src_img_path = None
+            if scene.get("image_bytes"):
+                src_img_path = os.path.join(tmpdir, f"src_img_{scene['spot']}.png")
+                with open(src_img_path, "wb") as f:
+                    f.write(scene["image_bytes"])
+
+            if has_animated_char:
+                # Sample animated frames at 6 fps for smooth motion while keeping cloud render times practical
+                sample_fps = 6
+                num_samples = max(4, dur * sample_fps)
+                sampled_paths = []
+                for k in range(num_samples):
+                    t_cur = k / sample_fps
+                    f_path = create_scene_frame_image(
+                        scene,
+                        w,
+                        h,
+                        tmpdir,
+                        t_sec=t_cur,
+                        src_img_path=src_img_path,
+                        frame_idx=k,
+                    )
+                    sampled_paths.append(f_path)
+                img_clip = ImageClip(sampled_paths[0]).with_duration(dur)
+                # Build animated clip via make_frame
+                per_frame_dur = dur / len(sampled_paths)
+                loaded_frames = [ImageClip(p).with_duration(per_frame_dur) for p in sampled_paths]
+                img_clip = concatenate_videoclips(loaded_frames, method="compose")
+            else:
+                frame_file = create_scene_frame_image(
+                    scene,
+                    w,
+                    h,
+                    tmpdir,
+                    t_sec=0.0,
+                    src_img_path=src_img_path,
+                    frame_idx=0,
+                )
+                img_clip = ImageClip(frame_file).with_duration(dur)
+
+            # Optional camera/motion preset
             v_preset = scene.get("video_preset", "")
             if "Ken Burns" in v_preset:
-                img_clip = img_clip.resized(lambda t: 1.0 + 0.015 * t)
+                img_clip = img_clip.resized(lambda t: 1.0 + 0.012 * t)
             elif "Pulse Zoom" in v_preset:
-                img_clip = img_clip.resized(lambda t: 1.0 + 0.02 * math.sin(math.pi * min(1.0, t / dur)))
+                img_clip = img_clip.resized(lambda t: 1.0 + 0.015 * math.sin(math.pi * min(1.0, t / dur)))
 
-            chosen_audio_path = None
-            if scene.get("audio_bytes"):
-                ext = ".wav" if (scene.get("audio_name") or "").lower().endswith(".wav") else ".mp3"
-                chosen_audio_path = os.path.join(tmpdir, f"audio_spot_{scene['spot']}{ext}")
-                with open(chosen_audio_path, "wb") as af:
-                    af.write(scene["audio_bytes"])
-            else:
-                sfx_wav = os.path.join(tmpdir, f"sfx_spot_{scene['spot']}.wav")
-                if synthesize_sfx_wav(scene.get("sfx", "None"), sfx_wav):
-                    chosen_audio_path = sfx_wav
+            audio_layers = []
+            vol = float(scene.get("audio_volume", 0.85))
 
-            if chosen_audio_path:
+            # 1) Character dubbing audio (pre-generated or auto-synthesized when enabled)
+            dub_bytes = scene.get("dub_audio_bytes")
+            if not dub_bytes and scene.get("enable_dubbing") and scene.get("text", "").strip():
+                voice_code = DUBBING_VOICE_PRESETS.get(
+                    scene.get("dub_voice_label", ""),
+                    ANIMATED_CHARACTER_PRESETS.get(char_name, {}).get("default_voice", "en-US-ChristopherNeural"),
+                )
+                dub_bytes = synthesize_character_dubbing(
+                    scene.get("text", ""),
+                    voice_code=voice_code,
+                    rate=scene.get("dub_rate", "+0%"),
+                )
+                scene["dub_audio_bytes"] = dub_bytes
+
+            if dub_bytes:
+                dub_path = os.path.join(tmpdir, f"dub_spot_{scene['spot']}.mp3")
+                with open(dub_path, "wb") as df:
+                    df.write(dub_bytes)
                 try:
-                    aud_clip = AudioFileClip(chosen_audio_path)
-                    vol = float(scene.get("audio_volume", 0.6))
-                    aud_clip = aud_clip.with_volume_scaled(vol)
-                    if aud_clip.duration > dur:
-                        aud_clip = aud_clip.subclipped(0, dur)
-                    img_clip = img_clip.with_audio(aud_clip)
+                    d_clip = AudioFileClip(dub_path).with_volume_scaled(vol)
+                    if d_clip.duration > dur:
+                        d_clip = d_clip.subclipped(0, dur)
+                    audio_layers.append(d_clip)
                 except Exception:
                     pass
+
+            # 2) Custom uploaded song/audio at this spot
+            if scene.get("audio_bytes"):
+                ext = ".wav" if (scene.get("audio_name") or "").lower().endswith(".wav") else ".mp3"
+                custom_aud_path = os.path.join(tmpdir, f"custom_audio_spot_{scene['spot']}{ext}")
+                with open(custom_aud_path, "wb") as af:
+                    af.write(scene["audio_bytes"])
+                try:
+                    c_clip = AudioFileClip(custom_aud_path).with_volume_scaled(vol * 0.7 if audio_layers else vol)
+                    if c_clip.duration > dur:
+                        c_clip = c_clip.subclipped(0, dur)
+                    audio_layers.append(c_clip)
+                except Exception:
+                    pass
+
+            # 3) Built-in SFX preset
+            sfx_wav = os.path.join(tmpdir, f"sfx_spot_{scene['spot']}.wav")
+            if synthesize_sfx_wav(scene.get("sfx", "None"), sfx_wav):
+                try:
+                    s_clip = AudioFileClip(sfx_wav).with_volume_scaled(min(1.5, vol * 0.8))
+                    if s_clip.duration > dur:
+                        s_clip = s_clip.subclipped(0, dur)
+                    audio_layers.append(s_clip)
+                except Exception:
+                    pass
+
+            if audio_layers:
+                mixed_audio = audio_layers[0] if len(audio_layers) == 1 else CompositeAudioClip(audio_layers)
+                img_clip = img_clip.with_audio(mixed_audio)
 
             clips.append(img_clip)
 
         final_video = concatenate_videoclips(clips, method="compose")
         out_mp4 = os.path.join(tmpdir, "final_youtube_video.mp4")
-        has_audio = any(s.get("audio_bytes") or (s.get("sfx") and s.get("sfx") != "None") for s in scenes)
+        has_audio = any(
+            s.get("dub_audio_bytes")
+            or s.get("enable_dubbing")
+            or s.get("audio_bytes")
+            or (s.get("sfx") and s.get("sfx") != "None")
+            for s in scenes
+        )
         final_video.write_videofile(
             out_mp4,
             fps=24,
@@ -516,11 +723,13 @@ def build_auto_draft_scenes(draft_text: str, source_label: str) -> list:
 
     picked = clean_lines[:4]
     backdrop_cycle = list(BACKDROP_PRESETS.keys())
-    char_cycle = CHARACTER_PRESETS[1:]
+    char_cycle = [k for k in ANIMATED_CHARACTER_PRESETS.keys() if k != "None (No Character)"]
+    motion_cycle = CHARACTER_MOTION_PRESETS
+    voice_cycle = list(DUBBING_VOICE_PRESETS.keys())
     vis_cycle = VISUAL_MEDIA_PRESETS
     vid_cycle = VIDEO_CLIP_PRESETS
     anim_cycle = ANIMATION_PRESETS
-    sfx_cycle = SFX_PRESETS[1:]
+    sfx_cycle = [s for s in SFX_PRESETS if s != "None"]
 
     built = []
     for idx, line in enumerate(picked, start=1):
@@ -534,6 +743,11 @@ def build_auto_draft_scenes(draft_text: str, source_label: str) -> list:
                 "backdrop_name": b_name,
                 "bg_color": BACKDROP_PRESETS[b_name],
                 "character": char_cycle[(idx - 1) % len(char_cycle)],
+                "char_motion": motion_cycle[(idx - 1) % len(motion_cycle)],
+                "enable_dubbing": True,
+                "dub_voice_label": voice_cycle[(idx - 1) % len(voice_cycle)],
+                "dub_rate": "+0%",
+                "dub_audio_bytes": None,
                 "visual_preset": vis_cycle[(idx - 1) % len(vis_cycle)],
                 "video_preset": vid_cycle[(idx - 1) % len(vid_cycle)],
                 "animation": anim_cycle[(idx - 1) % len(anim_cycle)],
@@ -542,7 +756,7 @@ def build_auto_draft_scenes(draft_text: str, source_label: str) -> list:
                 "image_name": None,
                 "audio_bytes": None,
                 "audio_name": None,
-                "audio_volume": 0.6,
+                "audio_volume": 0.85,
             }
         )
     return built
@@ -695,9 +909,9 @@ if "last_output" in st.session_state:
         mime="text/markdown",
     )
 
-# 7. Filter, Select, Edit & Assemble Video Spots with Market Presets
+# 7. Filter, Select, Edit & Assemble Video Spots with Animated Characters & Voice Dubbing
 st.divider()
-st.subheader("🎞️ Video Scene & Media Studio (Filter, Select Presets, Edit & Export .mp4)")
+st.subheader("🎞️ Complete Creator Studio (Filter, Animated Characters, Voice Dubbing, Presets & .mp4)")
 
 available_levels = list(all_outputs.keys())
 if available_levels:
@@ -733,11 +947,16 @@ if available_levels:
                 {
                     "spot": next_spot_num,
                     "title": f"Spot {next_spot_num}",
-                    "duration": 6,
+                    "duration": 7,
                     "text": st.session_state.get("editable_source_draft", "")[:240],
                     "backdrop_name": default_bg,
                     "bg_color": BACKDROP_PRESETS[default_bg],
-                    "character": CHARACTER_PRESETS[0],
+                    "character": "Calm Mentor (Animated)",
+                    "char_motion": "Idle Breathing & Bobbing",
+                    "enable_dubbing": True,
+                    "dub_voice_label": list(DUBBING_VOICE_PRESETS.keys())[0],
+                    "dub_rate": "+0%",
+                    "dub_audio_bytes": None,
                     "visual_preset": VISUAL_MEDIA_PRESETS[0],
                     "video_preset": VIDEO_CLIP_PRESETS[0],
                     "animation": ANIMATION_PRESETS[0],
@@ -746,7 +965,7 @@ if available_levels:
                     "image_name": None,
                     "audio_bytes": None,
                     "audio_name": None,
-                    "audio_volume": 0.6,
+                    "audio_volume": 0.85,
                 }
             )
             st.rerun()
@@ -757,6 +976,8 @@ if available_levels:
             picked_chunks = chunks[:3] if len(chunks) >= 3 else (raw_draft or "Life wisdom point").split(". ")[:3]
             new_scenes = []
             bg_list = list(BACKDROP_PRESETS.keys())
+            char_list = [k for k in ANIMATED_CHARACTER_PRESETS.keys() if k != "None (No Character)"]
+            voice_list = list(DUBBING_VOICE_PRESETS.keys())
             for idx, part in enumerate(picked_chunks, start=1):
                 b_name = bg_list[(idx - 1) % len(bg_list)]
                 new_scenes.append(
@@ -767,7 +988,12 @@ if available_levels:
                         "text": part[:350],
                         "backdrop_name": b_name,
                         "bg_color": BACKDROP_PRESETS[b_name],
-                        "character": CHARACTER_PRESETS[idx % len(CHARACTER_PRESETS)],
+                        "character": char_list[(idx - 1) % len(char_list)],
+                        "char_motion": CHARACTER_MOTION_PRESETS[idx % len(CHARACTER_MOTION_PRESETS)],
+                        "enable_dubbing": True,
+                        "dub_voice_label": voice_list[(idx - 1) % len(voice_list)],
+                        "dub_rate": "+0%",
+                        "dub_audio_bytes": None,
                         "visual_preset": VISUAL_MEDIA_PRESETS[idx % len(VISUAL_MEDIA_PRESETS)],
                         "video_preset": VIDEO_CLIP_PRESETS[idx % len(VIDEO_CLIP_PRESETS)],
                         "animation": ANIMATION_PRESETS[idx % len(ANIMATION_PRESETS)],
@@ -776,7 +1002,7 @@ if available_levels:
                         "image_name": None,
                         "audio_bytes": None,
                         "audio_name": None,
-                        "audio_volume": 0.6,
+                        "audio_volume": 0.85,
                     }
                 )
             if new_scenes:
@@ -785,7 +1011,7 @@ if available_levels:
     else:
         st.warning("No generated levels match your filter keyword.")
 else:
-    st.info("Generate at least one level above to filter and pull text into video spots—or edit your starter spots directly below.")
+    st.info("Generate at least one level above to filter and pull text into video spots—or build starter spots below.")
     if st.button("✨ Auto-Build Starter Spots from Channel Topic"):
         sample_draft = (
             f"Why {target_audience or 'beginners'} struggle with {channel_topic or 'life wisdom'} at first.\n\n"
@@ -795,38 +1021,71 @@ else:
         st.session_state["video_scenes"] = build_auto_draft_scenes(sample_draft, selected_level)
         st.rerun()
 
-# Spot-by-Spot Editor with Selectable Presets + Custom Uploads
-st.markdown("### 🧩 Spot-by-Spot Timeline Editor (Presets & Custom Media)")
+# Spot-by-Spot Timeline Editor
+st.markdown("### 🧩 Spot-by-Spot Timeline Editor (Animated Characters, Dubbing & Media)")
+char_keys = list(ANIMATED_CHARACTER_PRESETS.keys())
+voice_keys = list(DUBBING_VOICE_PRESETS.keys())
+b_keys = list(BACKDROP_PRESETS.keys())
+
 for idx, scene in enumerate(st.session_state["video_scenes"]):
+    dub_badge = "Dub ON" if scene.get("enable_dubbing") else "Dub OFF"
     with st.expander(
-        f"Spot {idx + 1}: {scene.get('title', 'Scene')} ({scene.get('duration', 6)}s) — {scene.get('sfx', 'None')}",
+        f"Spot {idx + 1}: {scene.get('title', 'Scene')} ({scene.get('duration', 7)}s) — {scene.get('character', 'None')} | {dub_badge}",
         expanded=(idx == 0),
     ):
         sc1, sc2, sc3 = st.columns([2, 1, 1])
         scene["title"] = sc1.text_input("Spot Label", value=scene.get("title", f"Spot {idx + 1}"), key=f"spot_title_{idx}")
-        scene["duration"] = sc2.number_input("Duration (sec)", min_value=2, max_value=60, value=int(scene.get("duration", 6)), key=f"spot_dur_{idx}")
+        scene["duration"] = sc2.number_input("Duration (sec)", min_value=2, max_value=60, value=int(scene.get("duration", 7)), key=f"spot_dur_{idx}")
 
-        b_keys = list(BACKDROP_PRESETS.keys())
         cur_b = scene.get("backdrop_name", b_keys[0])
         b_idx = b_keys.index(cur_b) if cur_b in b_keys else 0
         chosen_backdrop = sc3.selectbox("Backdrop Preset", b_keys, index=b_idx, key=f"spot_backdrop_{idx}")
         scene["backdrop_name"] = chosen_backdrop
         scene["bg_color"] = BACKDROP_PRESETS[chosen_backdrop]
 
-        p1, p2, p3, p4 = st.columns(4)
-        c_idx = CHARACTER_PRESETS.index(scene["character"]) if scene.get("character") in CHARACTER_PRESETS else 0
-        scene["character"] = p1.selectbox("Character Preset", CHARACTER_PRESETS, index=c_idx, key=f"spot_char_{idx}")
+        c_col1, c_col2, c_col3, c_col4 = st.columns([2, 2, 2, 1])
+        cur_char = scene.get("character", char_keys[1])
+        c_idx = char_keys.index(cur_char) if cur_char in char_keys else 0
+        scene["character"] = c_col1.selectbox("Animated Character", char_keys, index=c_idx, key=f"spot_char_{idx}")
 
+        cur_motion = scene.get("char_motion", CHARACTER_MOTION_PRESETS[0])
+        m_idx = CHARACTER_MOTION_PRESETS.index(cur_motion) if cur_motion in CHARACTER_MOTION_PRESETS else 0
+        scene["char_motion"] = c_col2.selectbox("Character Motion", CHARACTER_MOTION_PRESETS, index=m_idx, key=f"spot_motion_{idx}")
+
+        cur_voice = scene.get("dub_voice_label", voice_keys[0])
+        v_idx = voice_keys.index(cur_voice) if cur_voice in voice_keys else 0
+        scene["dub_voice_label"] = c_col3.selectbox("Character Dubbing Voice", voice_keys, index=v_idx, key=f"spot_voice_{idx}")
+
+        scene["enable_dubbing"] = c_col4.checkbox("Dub Script", value=bool(scene.get("enable_dubbing", True)), key=f"spot_dub_on_{idx}")
+
+        p1, p2, p3, p4 = st.columns(4)
         vis_idx = VISUAL_MEDIA_PRESETS.index(scene["visual_preset"]) if scene.get("visual_preset") in VISUAL_MEDIA_PRESETS else 0
-        scene["visual_preset"] = p2.selectbox("Image / Visual Preset", VISUAL_MEDIA_PRESETS, index=vis_idx, key=f"spot_vis_{idx}")
+        scene["visual_preset"] = p1.selectbox("Image / Visual Preset", VISUAL_MEDIA_PRESETS, index=vis_idx, key=f"spot_vis_{idx}")
 
         vid_idx = VIDEO_CLIP_PRESETS.index(scene["video_preset"]) if scene.get("video_preset") in VIDEO_CLIP_PRESETS else 0
-        scene["video_preset"] = p3.selectbox("Video / Motion Preset", VIDEO_CLIP_PRESETS, index=vid_idx, key=f"spot_vid_{idx}")
+        scene["video_preset"] = p2.selectbox("Video / Motion Preset", VIDEO_CLIP_PRESETS, index=vid_idx, key=f"spot_vid_{idx}")
 
         anim_idx = ANIMATION_PRESETS.index(scene["animation"]) if scene.get("animation") in ANIMATION_PRESETS else 0
-        scene["animation"] = p4.selectbox("Animation Preset", ANIMATION_PRESETS, index=anim_idx, key=f"spot_anim_{idx}")
+        scene["animation"] = p3.selectbox("Text Animation Preset", ANIMATION_PRESETS, index=anim_idx, key=f"spot_anim_{idx}")
 
-        scene["text"] = st.text_area("On-Screen / Narration Text for This Spot", value=scene.get("text", ""), height=90, key=f"spot_text_{idx}")
+        rate_options = ["-15%", "+0%", "+15%", "+25%"]
+        cur_rate = scene.get("dub_rate", "+0%")
+        r_idx = rate_options.index(cur_rate) if cur_rate in rate_options else 1
+        scene["dub_rate"] = p4.selectbox("Voice Speed", rate_options, index=r_idx, key=f"spot_rate_{idx}")
+
+        scene["text"] = st.text_area("Script / Narration Text for Dubbing & Screen", value=scene.get("text", ""), height=90, key=f"spot_text_{idx}")
+
+        if st.button(f"🎙️ Generate & Preview Dubbing for Spot {idx + 1}", key=f"prev_dub_{idx}"):
+            v_code = DUBBING_VOICE_PRESETS.get(scene["dub_voice_label"], "en-US-ChristopherNeural")
+            dub_data = synthesize_character_dubbing(scene["text"], v_code, scene["dub_rate"])
+            if dub_data:
+                scene["dub_audio_bytes"] = dub_data
+                st.success(f"Generated dubbing using {scene['dub_voice_label']}!")
+            else:
+                st.warning("Could not generate dubbing audio for empty text.")
+
+        if scene.get("dub_audio_bytes"):
+            st.audio(scene["dub_audio_bytes"], format="audio/mp3")
 
         m1, m2, m3, m4 = st.columns([2, 2, 2, 1])
         sfx_idx = SFX_PRESETS.index(scene["sfx"]) if scene.get("sfx") in SFX_PRESETS else 0
@@ -842,14 +1101,7 @@ for idx, scene in enumerate(st.session_state["video_scenes"]):
             scene["audio_bytes"] = aud_file.getvalue()
             scene["audio_name"] = aud_file.name
 
-        scene["audio_volume"] = m4.slider("Audio Vol", min_value=0.0, max_value=1.5, value=float(scene.get("audio_volume", 0.6)), step=0.1, key=f"spot_vol_{idx}")
-
-        if scene.get("image_name"):
-            st.caption(f"🖼️ Custom Image: `{scene['image_name']}`")
-        if scene.get("audio_name"):
-            st.caption(f"🎵 Custom Audio: `{scene['audio_name']}`")
-        elif scene.get("sfx") and scene.get("sfx") != "None":
-            st.caption(f"🔊 Built-in SFX Selected: `{scene['sfx']}`")
+        scene["audio_volume"] = m4.slider("Audio Vol", min_value=0.0, max_value=1.5, value=float(scene.get("audio_volume", 0.85)), step=0.1, key=f"spot_vol_{idx}")
 
         if len(st.session_state["video_scenes"]) > 1:
             if st.button(f"🗑️ Remove Spot {idx + 1}", key=f"del_spot_{idx}"):
@@ -865,7 +1117,7 @@ st.markdown("### 🎬 Finalize, Preview & Download Video")
 res_choice = st.selectbox("Output Format:", ["Landscape Long-Form (1280x720)", "Vertical Shorts (1080x1920)"])
 
 if st.button("🎥 Render Final Video (.mp4)", type="primary"):
-    with st.status("Rendering your video spots, presets, images, and audio...", expanded=True) as v_status:
+    with st.status("Rendering animated characters, voice dubbing, visuals, and .mp4...", expanded=True) as v_status:
         try:
             mp4_bytes = render_scenes_to_mp4(st.session_state["video_scenes"], res_choice)
             st.session_state["rendered_video_bytes"] = mp4_bytes
