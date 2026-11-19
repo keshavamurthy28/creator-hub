@@ -8,6 +8,7 @@ import tempfile
 import textwrap
 import time
 import wave
+
 from google import genai
 from google.genai import types
 from gtts import gTTS
@@ -964,6 +965,55 @@ def build_movie_scenes_from_script(script_text: str, ep_num: int = 1) -> list:
     return scenes
 
 
+def build_episode_blueprint_markdown(
+    scenes: list,
+    ep_num: int,
+    ep_title: str,
+    res_choice: str,
+    score_name: str | None = None,
+) -> str:
+    total_sec = sum(max(2, int(s.get("duration", 7))) for s in scenes)
+    lines = [
+        f"# Episode {ep_num:02d}: {ep_title}",
+        "",
+        "## Production Overview",
+        f"- **Episode Number:** {ep_num}",
+        f"- **Episode Title:** {ep_title}",
+        f"- **Total Scenes:** {len(scenes)}",
+        f"- **Estimated Runtime:** {total_sec} seconds",
+        f"- **Output Format:** {res_choice}",
+        f"- **Background Score:** {score_name or 'None'}",
+        "",
+        "---",
+        "",
+        "## Scene-by-Scene Blueprint",
+    ]
+
+    for idx, s in enumerate(scenes, start=1):
+        dial_on = bool(s.get("dialogue_mode", False))
+        lines.extend([
+            f"### Scene {idx}: {s.get('title', f'Scene {idx}')}",
+            f"- **Duration:** {s.get('duration', 7)}s | **Shot Type:** {s.get('shot_type', 'N/A')} | **Transition:** {s.get('transition', 'N/A')}",
+            f"- **Backdrop:** {s.get('backdrop_name', 'N/A')} (`{s.get('bg_color', '#0E131F')}`)",
+            f"- **Visual & Camera:** {s.get('visual_preset', 'N/A')} · {s.get('video_preset', 'N/A')}",
+            f"- **SFX:** {s.get('sfx', 'None')} | **Custom Image:** {s.get('image_name') or 'None'} | **Custom Audio:** {s.get('audio_name') or 'None'}",
+            f"- **Character A:** {s.get('character', 'None')} ({s.get('char_motion', 'N/A')})",
+            f"- **Character A Voice:** {s.get('dub_voice_label', 'N/A')} (Dubbing: {'ON' if s.get('enable_dubbing') else 'OFF'}, Pace: {s.get('dub_rate', '+0%')})",
+            f"- **Character A Script:** {s.get('text', '').strip() or '_No dialogue_'}",
+        ])
+
+        if dial_on:
+            lines.extend([
+                f"- **Character B:** {s.get('character_b', 'None')}",
+                f"- **Character B Voice:** {s.get('dub_voice_b', 'N/A')}",
+                f"- **Character B Dialogue:** {s.get('text_b', '').strip() or '_No dialogue_'}",
+            ])
+
+        lines.extend(["", "---", ""])
+
+    return "\n".join(lines)
+
+
 # 4. Main Display Area
 current_data = levels_data[selected_level]
 
@@ -1339,7 +1389,7 @@ for idx, scene in enumerate(st.session_state["video_scenes"]):
             demo_frame = build_scene_frame_pil(scene, 960, 540, t_sec=scrub_t, src_img_path=demo_img_path)
             demo_c1.image(demo_frame, caption=f"Live Scene Preview @ {scrub_t:.1f}s", use_container_width=True)
 
-        if demo_c2.button(f"🎙️ Preview Voice Dubbing", key=f"prev_dub_{idx}", use_container_width=True):
+        if demo_c2.button("🎙️ Preview Voice Dubbing", key=f"prev_dub_{idx}", use_container_width=True):
             v_code_a = DUBBING_VOICE_PRESETS.get(scene["dub_voice_label"], "en-US-ChristopherNeural")
             dub_data_a = synthesize_character_dubbing(scene["text"], v_code_a, scene["dub_rate"])
             if dub_data_a:
@@ -1383,9 +1433,19 @@ for idx, scene in enumerate(st.session_state["video_scenes"]):
 for i, s in enumerate(st.session_state["video_scenes"], start=1):
     s["spot"] = i
 
-# Render & Download Final Episode Movie
-st.markdown("### 🎬 Finalize, Preview & Download Episode (.mp4)")
+# Render & Download Final Episode Movie + Scene Blueprint
+st.markdown("### 🎬 Finalize, Preview & Download Episode (.mp4 & Blueprint)")
 res_choice = st.selectbox("Output Format:", ["Landscape Long-Form (1280x720)", "Vertical Shorts (1080x1920)"])
+
+ep_num = int(st.session_state.get("episode_number", 1))
+ep_title = st.session_state.get("episode_title", f"Episode {ep_num}")
+blueprint_md = build_episode_blueprint_markdown(
+    st.session_state["video_scenes"],
+    ep_num=ep_num,
+    ep_title=ep_title,
+    res_choice=res_choice,
+    score_name=st.session_state.get("global_score_name"),
+)
 
 if st.button("🎥 Render Final Episode (.mp4)", type="primary"):
     with st.status("Rendering episode scenes, characters, dialogue dubbing, music & .mp4...", expanded=True) as v_status:
@@ -1403,14 +1463,29 @@ if st.button("🎥 Render Final Episode (.mp4)", type="primary"):
             st.error(f"Could not render episode: {v_err}")
 
 if st.session_state.get("rendered_video_bytes"):
-    ep_num = st.session_state.get("episode_number", 1)
     st.video(st.session_state["rendered_video_bytes"])
-    st.download_button(
+    dl_col1, dl_col2 = st.columns(2)
+    dl_col1.download_button(
         label=f"⬇️ Download Episode {ep_num} Video (.mp4)",
         data=st.session_state["rendered_video_bytes"],
         file_name=f"episode_{ep_num:02d}_final_video.mp4",
         mime="video/mp4",
         type="primary",
+        use_container_width=True,
+    )
+    dl_col2.download_button(
+        label=f"📄 Download Episode {ep_num} Script & Scene Blueprint (.md)",
+        data=blueprint_md,
+        file_name=f"episode_{ep_num:02d}_scene_blueprint.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+else:
+    st.download_button(
+        label=f"📄 Download Episode {ep_num} Script & Scene Blueprint (.md)",
+        data=blueprint_md,
+        file_name=f"episode_{ep_num:02d}_scene_blueprint.md",
+        mime="text/markdown",
     )
 
 # Progress Tracker
