@@ -60,7 +60,6 @@ SHOT_TYPE_PRESETS = [
     "Reflective Outro Shot",
 ]
 
-# Custom-drawn copyright-safe human-like & cartoon characters
 CHARACTER_ROSTER = {
     "None (Pure Cinema / B-Roll)": {
         "style": "none",
@@ -160,6 +159,10 @@ if "level_mind_words" not in st.session_state:
     st.session_state["level_mind_words"] = {}
 if "all_level_outputs" not in st.session_state:
     st.session_state["all_level_outputs"] = {}
+if "episode_number" not in st.session_state:
+    st.session_state["episode_number"] = 1
+if "episode_title" not in st.session_state:
+    st.session_state["episode_title"] = "Episode 1: Starting Calmly"
 if "movie_script_input" not in st.session_state:
     st.session_state["movie_script_input"] = (
         "SCENE 1: A young beginner stands at a crossroads feeling overwhelmed by noisy advice.\n"
@@ -554,7 +557,6 @@ def _draw_movie_character(
         draw.ellipse((px - glow_r, py - glow_r, px + glow_r, py + glow_r), outline=skin, width=3)
 
     if style == "human":
-        # Human-like torso & shoulders
         torso_w = int(68 * scale)
         torso_h = int(64 * scale)
         draw.rounded_rectangle(
@@ -564,20 +566,15 @@ def _draw_movie_character(
             outline=(230, 235, 245),
             width=2,
         )
-        # Neck
         draw.rectangle((px - 12, py + r_head - 12, px + 12, py + r_head + 6), fill=skin)
-        # Head
         draw.ellipse((px - r_head, py - r_head, px + r_head, py + r_head), fill=skin, outline=(240, 240, 240), width=2)
-        # Hair cap
         draw.pieslice((px - r_head, py - r_head - 6, px + r_head, py + r_head - 4), start=180, end=360, fill=hair)
     else:
-        # Cartoon stylized body & larger expressive head
         body_w = int(62 * scale)
         draw.pieslice((px - body_w, py + r_head - 6, px + body_w, py + r_head + 68), start=180, end=360, fill=outfit, outline=skin, width=3)
         draw.ellipse((px - r_head - 4, py - r_head - 4, px + r_head + 4, py + r_head + 4), fill=skin, outline=(255, 255, 255), width=3)
         draw.pieslice((px - r_head - 4, py - r_head - 10, px + r_head + 4, py - 4), start=180, end=360, fill=hair)
 
-    # Eyes + blink
     eye_y = py - 4
     if blink_closed:
         draw.line((px - 20, eye_y, px - 8, eye_y), fill=(20, 24, 36), width=2)
@@ -588,7 +585,6 @@ def _draw_movie_character(
         draw.ellipse((px - 16, eye_y - 3, px - 10, eye_y + 4), fill=(20, 24, 36))
         draw.ellipse((px + 10, eye_y - 3, px + 16, eye_y + 4), fill=(20, 24, 36))
 
-    # Mouth animation
     mouth_y = py + 18
     if mouth_open:
         draw.ellipse((px - 11, mouth_y - 6, px + 11, mouth_y + 9), fill=(110, 28, 36))
@@ -598,21 +594,18 @@ def _draw_movie_character(
     draw.text((px - 58, py + r_head + 74), info["label"], fill=skin, font=font)
 
 
-def create_scene_frame_image(
+def build_scene_frame_pil(
     scene: dict,
     width: int,
     height: int,
-    temp_dir: str,
     t_sec: float = 0.0,
     src_img_path: str | None = None,
-    frame_idx: int = 0,
-) -> str:
+) -> Image.Image:
     bg_rgb = hex_to_rgb(scene.get("bg_color", "#0E131F"))
     canvas = Image.new("RGB", (width, height), bg_rgb)
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
 
-    # Subtle letterbox cinema bars top & bottom for movie feel
     bar_h = 28
     draw.rectangle((0, 0, width, bar_h), fill=(5, 7, 12))
     draw.rectangle((0, height - bar_h, width, height), fill=(5, 7, 12))
@@ -626,9 +619,10 @@ def create_scene_frame_image(
 
     shot_type = scene.get("shot_type", "Medium Character Shot")
     visual_tag = scene.get("visual_preset", "Cinematic Storyboard Card")
-    spot_label = f"SPOT {scene['spot']} — {scene.get('title', 'Scene')} [{shot_type}]"
+    ep_num = st.session_state.get("episode_number", 1)
+    spot_label = f"EP {ep_num} · SPOT {scene['spot']} — {scene.get('title', 'Scene')} [{shot_type}]"
     draw.text((60, bar_h + 10), spot_label, fill=(245, 197, 24), font=font)
-    draw.text((60, bar_h + 28), f"Visual: {visual_tag}", fill=(185, 195, 215), font=font)
+    draw.text((60, bar_h + 28), f"Visual: {visual_tag} | t={t_sec:.1f}s", fill=(185, 195, 215), font=font)
 
     right_reserve = 370 if dialogue_on else (290 if has_character else 60)
 
@@ -700,6 +694,19 @@ def create_scene_frame_image(
         draw.text((60, cur_y), line, fill=(248, 248, 248), font=font)
         cur_y += 22
 
+    return canvas
+
+
+def create_scene_frame_image(
+    scene: dict,
+    width: int,
+    height: int,
+    temp_dir: str,
+    t_sec: float = 0.0,
+    src_img_path: str | None = None,
+    frame_idx: int = 0,
+) -> str:
+    canvas = build_scene_frame_pil(scene, width, height, t_sec=t_sec, src_img_path=src_img_path)
     out_frame_path = os.path.join(temp_dir, f"frame_spot_{scene['spot']}_{frame_idx}.png")
     canvas.save(out_frame_path)
     return out_frame_path
@@ -862,7 +869,6 @@ def render_scenes_to_mp4(scenes: list, resolution_choice: str, global_score_byte
 
         final_video = concatenate_videoclips(clips, method="compose")
 
-        # Optional movie-wide background score / music bed
         if global_score_bytes:
             g_ext = ".wav" if (global_score_name or "").lower().endswith(".wav") else ".mp3"
             score_path = os.path.join(tmpdir, f"movie_score{g_ext}")
@@ -901,7 +907,7 @@ def render_scenes_to_mp4(scenes: list, resolution_choice: str, global_score_byte
         return mp4_data
 
 
-def build_movie_scenes_from_script(script_text: str) -> list:
+def build_movie_scenes_from_script(script_text: str, ep_num: int = 1) -> list:
     raw_lines = [
         line.strip().lstrip("#*-0123456789. ").strip()
         for line in script_text.splitlines()
@@ -909,9 +915,9 @@ def build_movie_scenes_from_script(script_text: str) -> list:
     ]
     if not raw_lines:
         raw_lines = [
-            "Opening scene introduces the main character and central life question.",
-            "Mid-scene turning point shares practical wisdom and perspective.",
-            "Closing scene ends with calm resolution and a clear takeaway.",
+            f"Episode {ep_num} opening introduces the main character and central life question.",
+            f"Episode {ep_num} mid-scene shares practical wisdom and perspective.",
+            f"Episode {ep_num} closing ends with calm resolution and a clear takeaway.",
         ]
 
     picked = raw_lines[:6]
@@ -927,7 +933,7 @@ def build_movie_scenes_from_script(script_text: str) -> list:
         scenes.append(
             {
                 "spot": idx,
-                "title": f"Movie Scene {idx}",
+                "title": f"Ep {ep_num} · Scene {idx}",
                 "shot_type": SHOT_TYPE_PRESETS[(idx - 1) % len(SHOT_TYPE_PRESETS)],
                 "duration": 7,
                 "transition": "Smooth Fade In",
@@ -1105,9 +1111,35 @@ if "last_output" in st.session_state:
         mime="text/markdown",
     )
 
-# 7. Movie Director & Scene Editing Studio
+# 7. Episode Studio with Top Live Development Tracker & Below-the-Edit Demo Preview
 st.divider()
-st.subheader("🎥 AI Movie & Story Studio (Script-to-Movie, Copyright-Safe Human/Cartoon Characters, Dubbing & Editing)")
+st.subheader("🎥 Episode & Movie Studio (Live Development View, Easy Panels & Below-the-Edit Demo)")
+
+# Top Live Episode Development Status Bar (updates dynamically as scenes/edits change)
+scenes_list = st.session_state["video_scenes"]
+total_ep_sec = sum(max(2, int(s.get("duration", 7))) for s in scenes_list)
+dubbed_scenes_count = sum(1 for s in scenes_list if s.get("enable_dubbing"))
+dialogue_scenes_count = sum(1 for s in scenes_list if s.get("dialogue_mode"))
+
+top_m1, top_m2, top_m3, top_m4 = st.columns(4)
+top_m1.metric("Episode", f"Ep {st.session_state.get('episode_number', 1)}")
+top_m2.metric("Total Scenes", len(scenes_list))
+top_m3.metric("Total Runtime", f"{total_ep_sec} sec")
+top_m4.metric("Dubbed / 2-Char", f"{dubbed_scenes_count} dub · {dialogue_scenes_count} dial")
+
+# Episode Identity & Script Controls
+ep_c1, ep_c2 = st.columns([1, 3])
+st.session_state["episode_number"] = ep_c1.number_input(
+    "Episode #",
+    min_value=1,
+    max_value=500,
+    value=int(st.session_state.get("episode_number", 1)),
+    step=1,
+)
+st.session_state["episode_title"] = ep_c2.text_input(
+    "Episode Title",
+    value=st.session_state.get("episode_title", "Episode 1: Starting Calmly"),
+)
 
 available_levels = list(all_outputs.keys())
 if available_levels:
@@ -1124,25 +1156,26 @@ if available_levels:
     ]
     if filtered_levels:
         chosen_lvl = st.selectbox("Pull Script/Ideas from Generated Level:", filtered_levels)
-        if st.button("📥 Load Selected Level Text into Movie Script"):
+        if st.button("📥 Load Selected Level Text into Episode Script"):
             st.session_state["movie_script_input"] = all_outputs[chosen_lvl]["content"][:2000]
             st.rerun()
 
 script_input = st.text_area(
-    "🎬 Movie / Story Script (Each line or scene becomes a movie shot when converted)",
+    "🎬 Episode Script (Each line or scene becomes a shot when converted)",
     value=st.session_state["movie_script_input"],
-    height=130,
+    height=120,
     key="script_editor_box",
 )
 st.session_state["movie_script_input"] = script_input
 
 ms_col1, ms_col2, ms_col3 = st.columns(3)
-if ms_col1.button("🎬 Convert Script into Movie Scenes", type="primary", use_container_width=True):
-    st.session_state["video_scenes"] = build_movie_scenes_from_script(script_input)
+if ms_col1.button("🎬 Convert Script into Episode Scenes", type="primary", use_container_width=True):
+    st.session_state["video_scenes"] = build_movie_scenes_from_script(script_input, st.session_state["episode_number"])
     st.rerun()
 
-if ms_col2.button("➕ Add New Movie Scene", use_container_width=True):
+if ms_col2.button("➕ Add New Scene to Episode", use_container_width=True):
     next_n = len(st.session_state["video_scenes"]) + 1
+    ep_num = st.session_state["episode_number"]
     b_keys = list(BACKDROP_PRESETS.keys())
     char_keys = list(CHARACTER_ROSTER.keys())
     voice_keys = list(DUBBING_VOICE_PRESETS.keys())
@@ -1150,11 +1183,11 @@ if ms_col2.button("➕ Add New Movie Scene", use_container_width=True):
     st.session_state["video_scenes"].append(
         {
             "spot": next_n,
-            "title": f"Movie Scene {next_n}",
+            "title": f"Ep {ep_num} · Scene {next_n}",
             "shot_type": SHOT_TYPE_PRESETS[(next_n - 1) % len(SHOT_TYPE_PRESETS)],
             "duration": 7,
             "transition": "Smooth Fade In",
-            "text": "Write the next beat of your movie story here.",
+            "text": "Write the next beat of this episode here.",
             "dialogue_mode": False,
             "character_b": char_keys[2],
             "dub_voice_b": voice_keys[1],
@@ -1180,16 +1213,16 @@ if ms_col2.button("➕ Add New Movie Scene", use_container_width=True):
     )
     st.rerun()
 
-score_upload = ms_col3.file_uploader("🎼 Movie Background Music / Score (All Scenes)", type=["mp3", "wav", "m4a"], key="global_score_uploader")
+score_upload = ms_col3.file_uploader("🎼 Episode Background Music / Score", type=["mp3", "wav", "m4a"], key="global_score_uploader")
 if score_upload is not None:
     st.session_state["global_score_bytes"] = score_upload.getvalue()
     st.session_state["global_score_name"] = score_upload.name
 
 if st.session_state.get("global_score_name"):
-    st.caption(f"🎼 Active Movie Score: `{st.session_state['global_score_name']}`")
+    st.caption(f"🎼 Active Episode Score: `{st.session_state['global_score_name']}`")
 
-# Movie Timeline & Scene Editor
-st.markdown("### 🧩 Movie Timeline Editor (Shots, Human/Cartoon Characters, Dialogue Dubbing & Media)")
+# Clean Scene Panels with Below-the-Edit Live Demo
+st.markdown("### 🧩 Scene Editor Panels (Edit on Top, Inspect Live Demo Directly Below)")
 char_keys = list(CHARACTER_ROSTER.keys())
 voice_keys = list(DUBBING_VOICE_PRESETS.keys())
 b_keys = list(BACKDROP_PRESETS.keys())
@@ -1201,54 +1234,53 @@ for idx, scene in enumerate(st.session_state["video_scenes"]):
         f"Scene {idx + 1}: {scene.get('title', 'Scene')} ({scene.get('duration', 7)}s) — {scene.get('character', 'None')} | {dub_badge}{dial_badge}",
         expanded=(idx == 0),
     ):
+        # Panel A: Scene Basics & Backdrop
         sc1, sc2, sc3, sc4 = st.columns([2, 2, 1, 1])
         scene["title"] = sc1.text_input("Scene Title", value=scene.get("title", f"Scene {idx + 1}"), key=f"spot_title_{idx}")
-
         cur_shot = scene.get("shot_type", SHOT_TYPE_PRESETS[0])
         sh_idx = SHOT_TYPE_PRESETS.index(cur_shot) if cur_shot in SHOT_TYPE_PRESETS else 0
         scene["shot_type"] = sc2.selectbox("Camera Shot Type", SHOT_TYPE_PRESETS, index=sh_idx, key=f"spot_shot_{idx}")
-
         scene["duration"] = sc3.number_input("Duration (sec)", min_value=2, max_value=60, value=int(scene.get("duration", 7)), key=f"spot_dur_{idx}")
-
         cur_b = scene.get("backdrop_name", b_keys[0])
         b_idx = b_keys.index(cur_b) if cur_b in b_keys else 0
         chosen_backdrop = sc4.selectbox("Backdrop / Mood", b_keys, index=b_idx, key=f"spot_backdrop_{idx}")
         scene["backdrop_name"] = chosen_backdrop
         scene["bg_color"] = BACKDROP_PRESETS[chosen_backdrop]
 
+        # Panel B: Characters, Animation & Dubbing Voice
         c_col1, c_col2, c_col3, c_col4 = st.columns([2, 2, 2, 1])
         cur_char = scene.get("character", char_keys[1])
         c_idx = char_keys.index(cur_char) if cur_char in char_keys else 0
-        scene["character"] = c_col1.selectbox("Character A (Human / Cartoon)", char_keys, index=c_idx, key=f"spot_char_{idx}")
+        scene["character"] = c_col1.selectbox("Character A", char_keys, index=c_idx, key=f"spot_char_{idx}")
 
         cur_motion = scene.get("char_motion", CHARACTER_MOTION_PRESETS[0])
         m_idx = CHARACTER_MOTION_PRESETS.index(cur_motion) if cur_motion in CHARACTER_MOTION_PRESETS else 0
-        scene["char_motion"] = c_col2.selectbox("Character Animation", CHARACTER_MOTION_PRESETS, index=m_idx, key=f"spot_motion_{idx}")
+        scene["char_motion"] = c_col2.selectbox("Character Motion", CHARACTER_MOTION_PRESETS, index=m_idx, key=f"spot_motion_{idx}")
 
         cur_voice = scene.get("dub_voice_label", voice_keys[0])
         v_idx = voice_keys.index(cur_voice) if cur_voice in voice_keys else 0
-        scene["dub_voice_label"] = c_col3.selectbox("Character A Dubbing Voice", voice_keys, index=v_idx, key=f"spot_voice_{idx}")
-
+        scene["dub_voice_label"] = c_col3.selectbox("Character A Voice", voice_keys, index=v_idx, key=f"spot_voice_{idx}")
         scene["enable_dubbing"] = c_col4.checkbox("Dub Script", value=bool(scene.get("enable_dubbing", True)), key=f"spot_dub_on_{idx}")
 
+        # Panel C: Visuals, Camera, Transition & Pace
         p1, p2, p3, p4 = st.columns(4)
         vis_idx = VISUAL_MEDIA_PRESETS.index(scene["visual_preset"]) if scene.get("visual_preset") in VISUAL_MEDIA_PRESETS else 0
-        scene["visual_preset"] = p1.selectbox("Scene Visual Preset", VISUAL_MEDIA_PRESETS, index=vis_idx, key=f"spot_vis_{idx}")
+        scene["visual_preset"] = p1.selectbox("Scene Visual", VISUAL_MEDIA_PRESETS, index=vis_idx, key=f"spot_vis_{idx}")
 
         vid_idx = VIDEO_CLIP_PRESETS.index(scene["video_preset"]) if scene.get("video_preset") in VIDEO_CLIP_PRESETS else 0
-        scene["video_preset"] = p2.selectbox("Camera Motion Preset", VIDEO_CLIP_PRESETS, index=vid_idx, key=f"spot_vid_{idx}")
+        scene["video_preset"] = p2.selectbox("Camera Motion", VIDEO_CLIP_PRESETS, index=vid_idx, key=f"spot_vid_{idx}")
 
         cur_tr = scene.get("transition", TRANSITION_PRESETS[0])
         tr_idx = TRANSITION_PRESETS.index(cur_tr) if cur_tr in TRANSITION_PRESETS else 0
-        scene["transition"] = p3.selectbox("Scene Transition", TRANSITION_PRESETS, index=tr_idx, key=f"spot_trans_{idx}")
+        scene["transition"] = p3.selectbox("Transition", TRANSITION_PRESETS, index=tr_idx, key=f"spot_trans_{idx}")
 
         rate_options = ["-15%", "+0%", "+15%", "+25%"]
         cur_rate = scene.get("dub_rate", "+0%")
         r_idx = rate_options.index(cur_rate) if cur_rate in rate_options else 1
         scene["dub_rate"] = p4.selectbox("Voice Pace", rate_options, index=r_idx, key=f"spot_rate_{idx}")
 
-        scene["text"] = st.text_area("Character A Script / Narration", value=scene.get("text", ""), height=85, key=f"spot_text_{idx}")
-
+        # Panel D: Script & Optional 2-Character Dialogue
+        scene["text"] = st.text_area("Character A Script / Narration", value=scene.get("text", ""), height=80, key=f"spot_text_{idx}")
         scene["dialogue_mode"] = st.checkbox(
             "Enable 2-Character Dialogue in This Scene",
             value=bool(scene.get("dialogue_mode", False)),
@@ -1259,57 +1291,76 @@ for idx, scene in enumerate(st.session_state["video_scenes"]):
             db1, db2 = st.columns(2)
             cur_cb = scene.get("character_b", char_keys[3] if len(char_keys) > 3 else char_keys[1])
             cb_idx = char_keys.index(cur_cb) if cur_cb in char_keys else 1
-            scene["character_b"] = db1.selectbox("Character B (Human / Cartoon)", char_keys, index=cb_idx, key=f"spot_char_b_{idx}")
+            scene["character_b"] = db1.selectbox("Character B", char_keys, index=cb_idx, key=f"spot_char_b_{idx}")
 
             cur_vb = scene.get("dub_voice_b", voice_keys[1] if len(voice_keys) > 1 else voice_keys[0])
             vb_idx = voice_keys.index(cur_vb) if cur_vb in voice_keys else 0
             scene["dub_voice_b"] = db2.selectbox("Character B Voice", voice_keys, index=vb_idx, key=f"spot_voice_b_{idx}")
 
-            scene["text_b"] = st.text_area(
-                "Character B Dialogue Line",
-                value=scene.get("text_b", ""),
-                height=75,
-                key=f"spot_text_b_{idx}",
-            )
+            scene["text_b"] = st.text_area("Character B Dialogue Line", value=scene.get("text_b", ""), height=70, key=f"spot_text_b_{idx}")
 
-        if st.button(f"🎙️ Generate & Preview Dubbing for Scene {idx + 1}", key=f"prev_dub_{idx}"):
+        # Panel E: SFX & Optional Custom Image/Audio
+        m1, m2, m3, m4 = st.columns([2, 2, 2, 1])
+        sfx_idx = SFX_PRESETS.index(scene["sfx"]) if scene.get("sfx") in SFX_PRESETS else 0
+        scene["sfx"] = m1.selectbox("Sound Effect (SFX)", SFX_PRESETS, index=sfx_idx, key=f"spot_sfx_{idx}")
+
+        img_file = m2.file_uploader(f"Custom Image (Scene {idx + 1})", type=["png", "jpg", "jpeg"], key=f"spot_img_{idx}")
+        if img_file is not None:
+            scene["image_bytes"] = img_file.getvalue()
+            scene["image_name"] = img_file.name
+
+        aud_file = m3.file_uploader(f"Custom Audio / Song (Scene {idx + 1})", type=["mp3", "wav", "m4a"], key=f"spot_aud_{idx}")
+        if aud_file is not None:
+            scene["audio_bytes"] = aud_file.getvalue()
+            scene["audio_name"] = aud_file.name
+
+        scene["audio_volume"] = m4.slider("Audio Vol", min_value=0.0, max_value=1.5, value=float(scene.get("audio_volume", 0.9)), step=0.1, key=f"spot_vol_{idx}")
+
+        # Below-the-Edit Live Demo Section (shows changes immediately without full video render)
+        st.markdown("---")
+        st.markdown("#### 👀 Live Below-the-Edit Demo (Inspect Before Full Render)")
+        demo_c1, demo_c2 = st.columns([2, 1])
+
+        scrub_t = demo_c2.slider(
+            "Scrub Motion Time (sec)",
+            min_value=0.0,
+            max_value=float(max(2, int(scene.get("duration", 7)))),
+            value=0.0,
+            step=0.2,
+            key=f"scrub_t_{idx}",
+        )
+
+        with tempfile.TemporaryDirectory() as demo_tmp:
+            demo_img_path = None
+            if scene.get("image_bytes"):
+                demo_img_path = os.path.join(demo_tmp, "demo_src.png")
+                with open(demo_img_path, "wb") as df_img:
+                    df_img.write(scene["image_bytes"])
+            demo_frame = build_scene_frame_pil(scene, 960, 540, t_sec=scrub_t, src_img_path=demo_img_path)
+            demo_c1.image(demo_frame, caption=f"Live Scene Preview @ {scrub_t:.1f}s", use_container_width=True)
+
+        if demo_c2.button(f"🎙️ Preview Voice Dubbing", key=f"prev_dub_{idx}", use_container_width=True):
             v_code_a = DUBBING_VOICE_PRESETS.get(scene["dub_voice_label"], "en-US-ChristopherNeural")
             dub_data_a = synthesize_character_dubbing(scene["text"], v_code_a, scene["dub_rate"])
             if dub_data_a:
                 scene["dub_audio_bytes"] = dub_data_a
-                st.success(f"Generated Character A dubbing using {scene['dub_voice_label']}!")
+                demo_c2.success("Character A dubbing ready!")
             else:
-                st.warning("Could not generate Character A dubbing for empty text.")
+                demo_c2.warning("Enter script text to dub.")
 
             if scene["dialogue_mode"] and scene.get("text_b", "").strip():
                 v_code_b = DUBBING_VOICE_PRESETS.get(scene.get("dub_voice_b", ""), "en-US-AriaNeural")
                 dub_data_b = synthesize_character_dubbing(scene["text_b"], v_code_b, scene["dub_rate"])
                 if dub_data_b:
                     scene["dub_audio_b_bytes"] = dub_data_b
-                    st.success(f"Generated Character B dubbing using {scene.get('dub_voice_b')}!")
+                    demo_c2.success("Character B dubbing ready!")
 
         if scene.get("dub_audio_bytes"):
-            st.caption("Character A Dubbing Preview:")
-            st.audio(scene["dub_audio_bytes"], format="audio/mp3")
+            demo_c2.caption("Character A Voice Demo:")
+            demo_c2.audio(scene["dub_audio_bytes"], format="audio/mp3")
         if scene.get("dialogue_mode") and scene.get("dub_audio_b_bytes"):
-            st.caption("Character B Dubbing Preview:")
-            st.audio(scene["dub_audio_b_bytes"], format="audio/mp3")
-
-        m1, m2, m3, m4 = st.columns([2, 2, 2, 1])
-        sfx_idx = SFX_PRESETS.index(scene["sfx"]) if scene.get("sfx") in SFX_PRESETS else 0
-        scene["sfx"] = m1.selectbox("Sound Effect (SFX)", SFX_PRESETS, index=sfx_idx, key=f"spot_sfx_{idx}")
-
-        img_file = m2.file_uploader(f"Insert Image at Scene {idx + 1}", type=["png", "jpg", "jpeg"], key=f"spot_img_{idx}")
-        if img_file is not None:
-            scene["image_bytes"] = img_file.getvalue()
-            scene["image_name"] = img_file.name
-
-        aud_file = m3.file_uploader(f"Insert Scene Song / SFX Audio {idx + 1}", type=["mp3", "wav", "m4a"], key=f"spot_aud_{idx}")
-        if aud_file is not None:
-            scene["audio_bytes"] = aud_file.getvalue()
-            scene["audio_name"] = aud_file.name
-
-        scene["audio_volume"] = m4.slider("Audio Vol", min_value=0.0, max_value=1.5, value=float(scene.get("audio_volume", 0.9)), step=0.1, key=f"spot_vol_{idx}")
+            demo_c2.caption("Character B Voice Demo:")
+            demo_c2.audio(scene["dub_audio_b_bytes"], format="audio/mp3")
 
         act1, act2, act3 = st.columns(3)
         if idx > 0 and act1.button("⬆️ Move Up", key=f"up_spot_{idx}"):
@@ -1332,12 +1383,12 @@ for idx, scene in enumerate(st.session_state["video_scenes"]):
 for i, s in enumerate(st.session_state["video_scenes"], start=1):
     s["spot"] = i
 
-# Render & Download Final Movie
-st.markdown("### 🎬 Finalize, Preview & Download Movie (.mp4)")
+# Render & Download Final Episode Movie
+st.markdown("### 🎬 Finalize, Preview & Download Episode (.mp4)")
 res_choice = st.selectbox("Output Format:", ["Landscape Long-Form (1280x720)", "Vertical Shorts (1080x1920)"])
 
-if st.button("🎥 Render Final Movie (.mp4)", type="primary"):
-    with st.status("Rendering movie scenes, human/cartoon characters, dialogue dubbing, music & .mp4...", expanded=True) as v_status:
+if st.button("🎥 Render Final Episode (.mp4)", type="primary"):
+    with st.status("Rendering episode scenes, characters, dialogue dubbing, music & .mp4...", expanded=True) as v_status:
         try:
             mp4_bytes = render_scenes_to_mp4(
                 st.session_state["video_scenes"],
@@ -1346,17 +1397,18 @@ if st.button("🎥 Render Final Movie (.mp4)", type="primary"):
                 global_score_name=st.session_state.get("global_score_name"),
             )
             st.session_state["rendered_video_bytes"] = mp4_bytes
-            v_status.update(label="Movie rendered successfully!", state="complete", expanded=False)
+            v_status.update(label="Episode rendered successfully!", state="complete", expanded=False)
         except Exception as v_err:
-            v_status.update(label="Movie rendering failed", state="error", expanded=True)
-            st.error(f"Could not render movie: {v_err}")
+            v_status.update(label="Episode rendering failed", state="error", expanded=True)
+            st.error(f"Could not render episode: {v_err}")
 
 if st.session_state.get("rendered_video_bytes"):
+    ep_num = st.session_state.get("episode_number", 1)
     st.video(st.session_state["rendered_video_bytes"])
     st.download_button(
-        label="⬇️ Download Final Movie (.mp4)",
+        label=f"⬇️ Download Episode {ep_num} Video (.mp4)",
         data=st.session_state["rendered_video_bytes"],
-        file_name="youtube_creator_final_movie.mp4",
+        file_name=f"episode_{ep_num:02d}_final_video.mp4",
         mime="video/mp4",
         type="primary",
     )
