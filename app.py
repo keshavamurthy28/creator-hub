@@ -1,4 +1,5 @@
 import os
+import time
 import streamlit as st
 from google import genai
 
@@ -173,7 +174,7 @@ elif selected_level == "Level 7: Read Analytics Like a Pro":
     views = c3.number_input("Avg Views per Video", min_value=0, value=500, step=50)
     extra_details = f"\n- Current Metrics: CTR is {ctr}%, Avg View Duration is {avd or 'N/A'}, Avg Views: {views}"
 
-# 5. Prompt Preview & Live AI Generation
+# 5. Prompt Preview & Live AI Generation (with retry & model fallback)
 final_prompt = current_data["prompt"] + context_addon + extra_details
 
 with st.expander("📋 View / Copy Raw Prompt"):
@@ -183,17 +184,38 @@ if st.button("🚀 Generate AI Response Now", type="primary"):
     if not api_key:
         st.error("Please enter a Gemini API key or add `GEMINI_API_KEY` to your Streamlit Secrets.")
     else:
+        models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"]
+        response_text = None
+        last_error = None
+        used_model = None
+
         with st.spinner("Generating your YouTube strategy with Gemini..."):
-            try:
-                client = genai.Client(api_key=api_key)
-                response = client.models.generate_content(
-                   model="gemini-3.8-flash",
-                    contents=final_prompt,
-                )
-                st.session_state["last_output"] = response.text
-                st.session_state["last_level"] = current_data["title"]
-            except Exception as e:
-                st.error(f"Error calling Gemini API: {e}")
+            client = genai.Client(api_key=api_key)
+
+            for model_name in models_to_try:
+                for attempt in range(2):
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=final_prompt,
+                        )
+                        response_text = response.text
+                        used_model = model_name
+                        break
+                    except Exception as e:
+                        last_error = e
+                        if "503" in str(e) or "UNAVAILABLE" in str(e):
+                            time.sleep(2)
+                            continue
+                        break
+                if response_text:
+                    break
+
+        if response_text:
+            st.session_state["last_output"] = response_text
+            st.session_state["last_level"] = f"{current_data['title']} ({used_model})"
+        else:
+            st.error(f"All models are temporarily busy. Please try again in a moment. Details: {last_error}")
 
 if "last_output" in st.session_state:
     st.subheader(f"✨ Output: {st.session_state.get('last_level', selected_level)}")
