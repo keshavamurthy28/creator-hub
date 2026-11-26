@@ -2,11 +2,12 @@ import asyncio
 import base64
 import io
 import os
+import subprocess
 import tempfile
 import urllib.parse
 import streamlit as st
 import streamlit.components.v1 as components
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 import requests
 
 try:
@@ -21,17 +22,61 @@ try:
 except ImportError:
     HAS_YTDLP = False
 
+try:
+    import imageio.v3 as iio
+    HAS_IMAGEIO = True
+except ImportError:
+    HAS_IMAGEIO = False
+
 st.set_page_config(
-    page_title="Creator Hub Studio — English & ಕನ್ನಡ",
+    page_title="Creator Hub Studio — AI & ಕನ್ನಡ / ಇಂಗ್ಲಿಷ್",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="collapsed",
+)
+
+# --- CUSTOM DARK STUDIO THEME CSS ---
+st.markdown(
+    """
+    <style>
+      .stApp {
+        background-color: #0b0e14;
+        color: #eef2f7;
+      }
+      .studio-monitor {
+        background: linear-gradient(180deg, #131824 0%, #0e121b 100%);
+        border: 1px solid #263042;
+        border-radius: 14px;
+        padding: 14px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+      }
+      .studio-badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        background: #1b2538;
+        color: #7cc4ff;
+        border: 1px solid #2d3e5e;
+        margin-right: 6px;
+      }
+      .script-card {
+        background: #121722;
+        border: 1px solid #232c3d;
+        border-radius: 10px;
+        padding: 12px;
+        margin-bottom: 8px;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 # --- SESSION STATE ---
 defaults = {
     "script_en": "",
     "script_kn": "",
+    "style_blueprint": "",
     "subtitles_bilingual": "",
     "pulled_video_path": None,
     "scenes": [],
@@ -76,6 +121,21 @@ def run_async(coro):
         return asyncio.run(coro)
 
 
+def load_kannada_font(size: int = 34):
+    candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansKannada-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansKannada-Regular.otf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size=size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
+
 async def generate_kannada_tts_and_bilingual_srt(
     kn_text: str, en_text: str, voice: str, rate: str, pitch: str
 ):
@@ -98,10 +158,10 @@ async def generate_kannada_tts_and_bilingual_srt(
             audio_buf.write(chunk["data"])
         elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
             start_s = chunk["offset"] / 10_000_000
-            dur_s = max(chunk["duration"] / 10_000_000, 0.35)
+            dur_s = max(chunk["duration"] / 10_000_000, 0.4)
             word_kn = chunk.get("text", "").strip()
             if word_kn:
-                sub_line = f"{word_kn} | {en_preview[:45]}" if en_preview else word_kn
+                sub_line = f"{word_kn} | {en_preview[:48]}" if en_preview else word_kn
                 srt_lines.append(f"{idx}\n{fmt_srt(start_s)} --> {fmt_srt(start_s + dur_s)}\n{sub_line}\n")
                 idx += 1
 
@@ -113,8 +173,13 @@ async def generate_kannada_tts_and_bilingual_srt(
     return audio_buf.getvalue(), srt_str
 
 
-def generate_ai_character_image(prompt_en: str, prompt_kn: str, style: str, api_key: str = "") -> Image.Image:
-    combined_prompt = f"{style} character animation scene, expressive character, clean composition, {prompt_en} {prompt_kn}".strip()
+def generate_ai_character_image(
+    prompt_en: str, prompt_kn: str, style: str, api_key: str = "", ref_image: Image.Image | None = None
+) -> Image.Image:
+    combined_prompt = (
+        f"{style} character animation scene, expressive character, clean composition, "
+        f"consistent character design, {prompt_en} {prompt_kn}"
+    ).strip()
     if api_key.strip():
         try:
             encoded = urllib.parse.quote(combined_prompt)
@@ -125,21 +190,57 @@ def generate_ai_character_image(prompt_en: str, prompt_kn: str, style: str, api_
         except Exception:
             pass
 
+    if ref_image is not None:
+        base = ref_image.convert("RGB").resize((768, 1280))
+        d = ImageDraw.Draw(base)
+        font_kn = load_kannada_font(30)
+        d.rectangle([30, 1080, 738, 1230], fill=(15, 18, 28))
+        d.text((50, 1100), f"EN: {prompt_en[:46]}", fill=(255, 220, 110))
+        d.text((50, 1150), f"ಕನ್ನಡ: {prompt_kn[:36]}", fill=(160, 235, 200), font=font_kn)
+        return base
+
     w, h = 768, 1280
-    img = Image.new("RGB", (w, h), (24, 21, 40))
+    img = Image.new("RGB", (w, h), (22, 24, 38))
     draw = ImageDraw.Draw(img)
-    draw.ellipse([-120, 140, 888, 1140], fill=(44, 35, 70))
-    draw.ellipse([80, 260, 688, 860], fill=(68, 48, 96))
+    font_kn = load_kannada_font(30)
+    draw.ellipse([-120, 140, 888, 1140], fill=(38, 44, 72))
+    draw.ellipse([80, 260, 688, 860], fill=(58, 52, 92))
     draw.ellipse([284, 340, 484, 540], fill=(242, 196, 155))
     draw.pieslice([284, 325, 484, 455], start=180, end=360, fill=(35, 28, 46))
     draw.ellipse([342, 425, 366, 449], fill=(28, 25, 35))
     draw.ellipse([402, 425, 426, 449], fill=(28, 25, 35))
     draw.arc([356, 460, 412, 495], start=15, end=165, fill=(185, 78, 78), width=4)
     draw.rounded_rectangle([210, 550, 558, 940], radius=70, fill=(235, 130, 52))
-    draw.text((60, 980), f"Style / ಶೈಲಿ: {style}", fill=(255, 215, 100))
-    draw.text((60, 1025), f"EN: {prompt_en[:58]}", fill=(235, 240, 250))
-    draw.text((60, 1070), f"KN: {prompt_kn[:58]}", fill=(165, 230, 200))
+    draw.text((50, 980), f"Style / ಶೈಲಿ: {style}", fill=(255, 215, 100))
+    draw.text((50, 1025), f"EN: {prompt_en[:52]}", fill=(235, 240, 250))
+    draw.text((50, 1075), f"ಕನ್ನಡ: {prompt_kn[:36]}", fill=(165, 230, 200), font=font_kn)
     return img
+
+
+def build_motion_frames(base_img: Image.Image, motion_preset: str, num_frames: int = 8) -> list[Image.Image]:
+    """Generates smooth pan/zoom/drift animation frames from a scene image."""
+    w, h = base_img.size
+    frames = []
+    src = base_img.convert("RGB")
+    for i in range(num_frames):
+        t = i / max(1, num_frames - 1)
+        if "Zoom" in motion_preset:
+            zoom = 1.0 + 0.12 * t
+            nw, nh = int(w / zoom), int(h / zoom)
+            left = (w - nw) // 2
+            top = (h - nh) // 2
+            crop = src.crop((left, top, left + nw, top + nh)).resize((w, h), Image.Resampling.LANCZOS)
+        elif "Pan" in motion_preset:
+            max_shift = max(1, int(w * 0.08))
+            left = int(max_shift * t)
+            crop = src.crop((left, 0, w - (max_shift - left), h)).resize((w, h), Image.Resampling.LANCZOS)
+        elif "Drift" in motion_preset:
+            shift_y = int(24 * (t - 0.5))
+            crop = ImageOps.pad(src, (w, h), color=(15, 18, 28), centering=(0.5, 0.5 + shift_y / max(1, h)))
+        else:
+            crop = src.copy()
+        frames.append(crop)
+    return frames
 
 
 def apply_inshot_frame_edits(img: Image.Image) -> Image.Image:
@@ -169,32 +270,67 @@ def apply_inshot_frame_edits(img: Image.Image) -> Image.Image:
         out = Image.blend(dark_bg, out, st.session_state.opacity)
 
     draw = ImageDraw.Draw(out)
+    font_kn = load_kannada_font(28)
     w, h = out.size
     kn_line = st.session_state.overlay_kn.strip()
     en_line = st.session_state.overlay_en.strip()
     if kn_line or en_line:
         draw.rectangle([36, h - 250, w - 36, h - 105], fill=(14, 14, 22))
         if kn_line:
-            draw.text((65, h - 220), f"ಕನ್ನಡ: {kn_line}", fill=(255, 220, 90))
+            draw.text((65, h - 225), f"ಕನ್ನಡ: {kn_line}", fill=(255, 220, 90), font=font_kn)
         if en_line:
-            draw.text((65, h - 170), f"EN: {en_line}", fill=(170, 225, 255))
+            draw.text((65, h - 165), f"EN: {en_line}", fill=(170, 225, 255))
     if st.session_state.sticker_text.strip():
-        draw.text((w - 220, 70), st.session_state.sticker_text.strip(), fill=(255, 255, 255))
+        draw.text((max(20, w - 220), 70), st.session_state.sticker_text.strip(), fill=(255, 255, 255), font=font_kn)
     return out
+
+
+def render_mp4_from_scenes(scenes: list[Image.Image], audio_bytes: bytes | None, fps: int = 12) -> bytes | None:
+    """Renders an MP4 clip from scenes + optional audio when imageio/ffmpeg is installed."""
+    if not scenes or not HAS_IMAGEIO:
+        return None
+    try:
+        expanded = []
+        for sc in scenes:
+            edited = apply_inshot_frame_edits(sc).resize((720, 1280))
+            expanded.extend(build_motion_frames(edited, "Ken Burns Zoom-In", num_frames=6))
+
+        tmp_dir = tempfile.mkdtemp(prefix="kkm_render_")
+        raw_mp4 = os.path.join(tmp_dir, "raw_scenes.mp4")
+        iio.imwrite(raw_mp4, [f for f in expanded], fps=fps, codec="libx264")
+
+        if audio_bytes:
+            audio_mp3 = os.path.join(tmp_dir, "voice.mp3")
+            final_mp4 = os.path.join(tmp_dir, "final_output.mp4")
+            with open(audio_mp3, "wb") as af:
+                af.write(audio_bytes)
+            cmd = [
+                "ffmpeg", "-y", "-i", raw_mp4, "-i", audio_mp3,
+                "-c:v", "copy", "-c:a", "aac", "-shortest", final_mp4,
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if res.returncode == 0 and os.path.exists(final_mp4):
+                with open(final_mp4, "rb") as out_f:
+                    return out_f.read()
+
+        with open(raw_mp4, "rb") as r_f:
+            return r_f.read()
+    except Exception:
+        return None
 
 
 def render_video_player_html(video_bytes: bytes, start_sec: float, speed: float):
     b64_vid = base64.b64encode(video_bytes).decode("utf-8")
     html = f"""
-    <div style="background:#111318;padding:12px;border-radius:10px;border:1px solid #2b303c;">
-      <video id="studioVid" controls style="width:100%;max-height:420px;border-radius:8px;background:#000;">
+    <div style="background:#0f141e;padding:12px;border-radius:12px;border:1px solid #283449;">
+      <video id="studioVid" controls style="width:100%;max-height:430px;border-radius:8px;background:#000;">
         <source src="data:video/mp4;base64,{b64_vid}" type="video/mp4">
       </video>
-      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center;color:#cfd6e4;font-family:sans-serif;font-size:13px;">
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center;color:#d6e0f0;font-family:sans-serif;font-size:13px;">
         <button onclick="const v=document.getElementById('studioVid');v.currentTime=Math.max(0,v.currentTime-5);">⏪ -5s / ಹಿಂದಕ್ಕೆ</button>
         <button onclick="const v=document.getElementById('studioVid');v.paused?v.play():v.pause();">⏯️ Play/Pause / ಪ್ಲೇ</button>
         <button onclick="const v=document.getElementById('studioVid');v.currentTime=v.currentTime+5;">⏩ +5s / ಮುಂದಕ್ಕೆ</button>
-        <span>Speed / ವೇಗ: {speed}x | Jump / ಜಂಪ್: {start_sec:.1f}s</span>
+        <span>Speed / ವೇಗ: {speed}x | Marker / ಮಾರ್ಕರ್: {start_sec:.1f}s</span>
       </div>
     </div>
     <script>
@@ -207,13 +343,19 @@ def render_video_player_html(video_bytes: bytes, start_sec: float, speed: float)
       }});
     </script>
     """
-    components.html(html, height=495)
+    components.html(html, height=505)
 
 
 # ==============================================================================
-# TOP: MEDIA PLAYER SCREEN (ENGLISH + ಕನ್ನಡ)
+# TOP STUDIO HEADER & MEDIA PLAYER MONITOR (ENGLISH + ಕನ್ನಡ)
 # ==============================================================================
-st.markdown("## 🎬 Creator Hub Studio — English & ಕನ್ನಡ / ಇಂಗ್ಲಿಷ್ ಮತ್ತು ಕನ್ನಡ ಸ್ಟುಡಿಯೋ")
+st.markdown("## 🎬 Creator Hub Studio — AI & ಕನ್ನಡ / ಇಂಗ್ಲಿಷ್ ಸ್ಟುಡಿಯೋ")
+st.markdown(
+    '<span class="studio-badge">AI Scene & Script / AI ದೃಶ್ಯ & ಸ್ಕ್ರಿಪ್ಟ್</span>'
+    '<span class="studio-badge">ಕನ್ನಡ Voice & SRT / ಧ್ವನಿ & ಉಪಶೀರ್ಷಿಕೆ</span>'
+    '<span class="studio-badge">Style Recreation / ಶೈಲಿ ಪುನರ್ರಚನೆ</span>',
+    unsafe_allow_html=True,
+)
 
 pollinations_key = ""
 try:
@@ -227,9 +369,10 @@ with st.sidebar:
     if key_input:
         pollinations_key = key_input
 
-screen_col, side_col = st.columns([3, 1])
+screen_col, side_col = st.columns([3.1, 1.1])
 
 with screen_col:
+    st.markdown('<div class="studio-monitor">', unsafe_allow_html=True)
     if st.session_state.final_video_bytes:
         render_video_player_html(
             st.session_state.final_video_bytes,
@@ -243,19 +386,19 @@ with screen_col:
         preview_img = apply_inshot_frame_edits(st.session_state.scenes[-1])
         st.image(
             preview_img,
-            caption="Live Scene Monitor / ಲೈವ್ ದೃಶ್ಯ ಮಾನಿಟರ್",
+            caption="Live Studio Monitor / ಲೈವ್ ಸ್ಟುಡಿಯೋ ಮಾನಿಟರ್",
             use_container_width=True,
         )
     else:
         st.markdown(
             """
-            <div style="background:#111318;color:#d6dde8;height:280px;border-radius:10px;
+            <div style="background:#0d111a;color:#d6dde8;height:280px;border-radius:10px;
                         display:flex;flex-direction:column;align-items:center;justify-content:center;
-                        border:1px dashed #3b4254;text-align:center;padding:16px;">
-              <div style="font-size:36px;">🎞️</div>
-              <div style="font-size:16px;margin-top:8px;"><b>Studio Screen Ready / ಸ್ಟುಡಿಯೋ ಸ್ಕ್ರೀನ್ ಸಿದ್ಧವಾಗಿದೆ</b></div>
+                        border:1px dashed #32415c;text-align:center;padding:16px;">
+              <div style="font-size:38px;">🎞️</div>
+              <div style="font-size:17px;margin-top:8px;"><b>Monitor Ready / ಮಾನಿಟರ್ ಸಿದ್ಧವಾಗಿದೆ</b></div>
               <div style="font-size:13px;opacity:0.85;margin-top:4px;">
-                Create a character, paste a link, or upload media below • ಕೆಳಗೆ ಕ್ಯಾರೆಕ್ಟರ್ ರಚಿಸಿ, ಲಿಂಕ್ ಹಾಕಿ ಅಥವಾ ವಿಡಿಯೋ ಅಪ್‌ಲೋಡ್ ಮಾಡಿ
+                Generate AI scenes, pull a video link, or drop your own media below • ಕೆಳಗೆ ದೃಶ್ಯ ರಚಿಸಿ, ಲಿಂಕ್ ಹಾಕಿ ಅಥವಾ ಫೈಲ್ ಅಪ್‌ಲೋಡ್ ಮಾಡಿ
               </div>
             </div>
             """,
@@ -275,25 +418,26 @@ with screen_col:
     if m4.button("📍 25s CTA / ಮುಕ್ತಾಯ"):
         st.session_state.jump_sec = 25.0
         st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with side_col:
-    st.markdown("#### 🎙️ Voice & Subtitles / ಧ್ವನಿ ಮತ್ತು ಉಪಶೀರ್ಷಿಕೆ")
+    st.markdown("#### 🎙️ Kannada Voice & Bilingual Script / ಧ್ವನಿ ಮತ್ತು ಸ್ಕ್ರಿಪ್ಟ್")
     if st.session_state.generated_audio:
         st.audio(st.session_state.generated_audio, format="audio/mp3")
     if st.session_state.script_kn or st.session_state.script_en:
         if st.session_state.script_kn:
-            st.success(f"**ಕನ್ನಡ:** {st.session_state.script_kn}")
+            st.markdown(f'<div class="script-card"><b>ಕನ್ನಡ:</b><br>{st.session_state.script_kn}</div>', unsafe_allow_html=True)
         if st.session_state.script_en:
-            st.info(f"**English:** {st.session_state.script_en}")
+            st.markdown(f'<div class="script-card"><b>English:</b><br>{st.session_state.script_en}</div>', unsafe_allow_html=True)
     else:
         st.caption("No script generated yet / ಇನ್ನೂ ಸ್ಕ್ರಿಪ್ಟ್ ರಚಿಸಲಾಗಿಲ್ಲ.")
 
 st.divider()
 
 # ==============================================================================
-# INSHOT-STYLE EDITING BAR (ENGLISH + ಕನ್ನಡ)
+# INSHOT-STYLE EDITING DOCK (ENGLISH + ಕನ್ನಡ)
 # ==============================================================================
-st.markdown("### 🎛️ InShot-Style Editing Bar / ಎಡಿಟಿಂಗ್ ಟೂಲ್‌ಬಾರ್")
+st.markdown("### 🎛️ InShot-Style Editing Dock / ಎಡಿಟಿಂಗ್ ಟೂಲ್‌ಬಾರ್")
 b1, b2, b3, b4, b5 = st.columns(5)
 if b1.button("✂️ Trim / Split • ಕತ್ತರಿಸಿ"):
     st.session_state.tool_group = "Trim & Cut / ಕತ್ತರಿಸಿ"
@@ -336,27 +480,38 @@ else:
 st.divider()
 
 # ==============================================================================
-# WORKFLOW TABS (ENGLISH + ಕನ್ನಡ IN EVERY TAB)
+# AI WORKFLOW TABS (ENGLISH + ಕನ್ನಡ IN EVERY TAB)
 # ==============================================================================
 t1, t2, t3, t4 = st.tabs([
-    "🎭 Character & Scene / ಕ್ಯಾರೆಕ್ಟರ್ ಮತ್ತು ದೃಶ್ಯ",
-    "📜 Bilingual Script & Voice / ದ್ವಿಭಾಷಾ ಸ್ಕ್ರಿಪ್ಟ್ ಮತ್ತು ಧ್ವನಿ",
+    "🎭 AI Character & Motion / ಕ್ಯಾರೆಕ್ಟರ್ ಮತ್ತು ಚಲನೆ",
+    "📜 AI Script, Style & Voice / ಸ್ಕ್ರಿಪ್ಟ್, ಶೈಲಿ ಮತ್ತು ಧ್ವನಿ",
     "🔗 Direct Link & Upload / ಲಿಂಕ್ ಮತ್ತು ಅಪ್‌ಲೋಡ್",
-    "📥 Exports / ಡೌನ್‌ಲೋಡ್ (TXT, SRT, MP3)",
+    "📥 Render & Export / ರೆಂಡರ್ ಮತ್ತು ಡೌನ್‌ಲೋಡ್",
 ])
 
 with t1:
-    st.subheader("Create Character & Scene / ಕ್ಯಾರೆಕ್ಟರ್ ಮತ್ತು ದೃಶ್ಯ ರಚಿಸಿ")
+    st.subheader("AI Character & Scene Generator / AI ಕ್ಯಾರೆಕ್ಟರ್ ಮತ್ತು ದೃಶ್ಯ ರಚನೆ")
     p1, p2, p3 = st.columns([2, 2, 1])
     char_en = p1.text_input("Prompt (English) / ವಿವರಣೆ (ಇಂಗ್ಲಿಷ್)", "young entrepreneur explaining smart savings with friendly smile")
     char_kn = p2.text_input("Prompt (Kannada) / ವಿವರಣೆ (ಕನ್ನಡ)", "ಸ್ಮಾರ್ಟ್ ಉಳಿತಾಯದ ಬಗ್ಗೆ ವಿವರಿಸುತ್ತಿರುವ ಯುವ ಉದ್ಯಮಿ")
     char_style = p3.selectbox("Style / ಶೈಲಿ", ["3D Pixar / 3D ಶೈಲಿ", "Anime / ಅನಿಮೆ", "Comic Ink / ಕಾಮಿಕ್", "Flat Vector / ವೆಕ್ಟರ್"])
 
+    m_col1, m_col2 = st.columns([1, 2])
+    motion_choice = m_col1.selectbox(
+        "Motion Preset / ಚಲನೆಯ ಶೈಲಿ",
+        ["Ken Burns Zoom-In / ಜೂಮ್", "Ken Burns Pan-Right / ಪ್ಯಾನ್", "Parallax Drift / ಡ್ರಿಫ್ಟ್", "Static / ಸ್ಥಿರ"],
+    )
+    use_prev_char = m_col2.checkbox(
+        "Keep previous scene as character reference / ಹಿಂದಿನ ದೃಶ್ಯವನ್ನು ಆಧಾರವಾಗಿ ಬಳಸಿ",
+        value=True,
+    )
+
     if st.button("✨ Generate Scene / ದೃಶ್ಯ ರಚಿಸಿ", type="primary"):
-        with st.spinner("Creating scene / ದೃಶ್ಯ ರಚಿಸಲಾಗುತ್ತಿದೆ..."):
-            img_scene = generate_ai_character_image(char_en, char_kn, char_style, pollinations_key)
+        with st.spinner("Generating character scene / ದೃಶ್ಯ ರಚಿಸಲಾಗುತ್ತಿದೆ..."):
+            ref_img = st.session_state.scenes[-1] if (use_prev_char and st.session_state.scenes) else None
+            img_scene = generate_ai_character_image(char_en, char_kn, char_style, pollinations_key, ref_img)
             st.session_state.scenes.append(img_scene)
-            st.session_state.scene_labels.append(f"{char_en[:28]} | {char_kn[:28]}")
+            st.session_state.scene_labels.append(f"{char_en[:24]} | {char_kn[:24]} ({motion_choice.split('/')[0].strip()})")
             st.rerun()
 
     if st.session_state.scenes:
@@ -367,31 +522,46 @@ with t1:
                 st.image(sc, caption=f"Scene {idx + 1} / ದೃಶ್ಯ {idx + 1}: {lbl}", use_container_width=True)
 
 with t2:
-    st.subheader("30s Reel / Story Script (English + ಕನ್ನಡ) & Voiceover")
+    st.subheader("AI Script, Reel Style Blueprint & Kannada Voice / AI ಸ್ಕ್ರಿಪ್ಟ್, ಶೈಲಿ ಮತ್ತು ಧ್ವನಿ")
     idea_en = st.text_input("Topic (English) / ವಿಷಯ (ಇಂಗ್ಲಿಷ್)", "3 smart second-income habits in 30 seconds")
     idea_kn = st.text_input("Topic (Kannada) / ವಿಷಯ (ಕನ್ನಡ)", "30 ಸೆಕೆಂಡ್‌ಗಳಲ್ಲಿ 3 ಸ್ಮಾರ್ಟ್ ಹೆಚ್ಚುವರಿ ಆದಾಯದ ಅಭ್ಯಾಸಗಳು")
+    ref_notes = st.text_input(
+        "Reference Reel / Video Style Notes (Hook, Pacing, Visual Style) / ರೆಫರೆನ್ಸ್ ವಿಡಿಯೋ ಶೈಲಿ ವಿವರ",
+        placeholder="Fast 3s hook, bold captions, upbeat rhythm, clean character close-ups...",
+    )
 
-    if st.button("📝 Generate Both Scripts / ಎರಡೂ ಸ್ಕ್ರಿಪ್ಟ್ ರಚಿಸಿ"):
+    if st.button("🧠 Generate AI Script & Style Plan / AI ಸ್ಕ್ರಿಪ್ಟ್ ಮತ್ತು ಶೈಲಿ ಯೋಜನೆ ರಚಿಸಿ"):
+        st.session_state.style_blueprint = (
+            f"Hook (0-3s): Bold question or surprising fact | "
+            f"Pacing: Crisp 30s beats | Visual Style: {ref_notes.strip() or 'High-contrast character + clear captions'}"
+        )
         st.session_state.script_en = (
-            f"30-Second Guide on '{idea_en}': 1) Pick a practical skill, "
-            f"2) Start small consistently, 3) Track weekly results. Follow for more!"
+            f"30s Blueprint on '{idea_en}': "
+            f"[0-3s Hook] Stop scrolling—here is a practical way to build extra income. "
+            f"[3-24s Steps] 1) Pick a high-demand skill, 2) Practice daily in small blocks, 3) Share proof & results. "
+            f"[24-30s CTA] Save this reel and follow for Kannada guides!"
         )
         st.session_state.script_kn = (
-            f"'{idea_kn}' ಬಗ್ಗೆ 30 ಸೆಕೆಂಡ್ ಮಾಹಿತಿ: 1) ನಿಮ್ಮ ಕೌಶಲ್ಯ ಆಯ್ಕೆ ಮಾಡಿ, "
-            f"2) ಸಣ್ಣ ಮಟ್ಟದಲ್ಲಿ ನಿರಂತರವಾಗಿ ಆರಂಭಿಸಿ, 3) ವಾರಕ್ಕೊಮ್ಮೆ ಪ್ರಗತಿ ಗಮನಿಸಿ. ಹೆಚ್ಚಿನ ಮಾಹಿತಿಗೆ ಫಾಲೋ ಮಾಡಿ!"
+            f"'{idea_kn}' ಬಗ್ಗೆ 30 ಸೆಕೆಂಡ್ AI ಯೋಜನೆ: "
+            f"[0-3s ಆಕರ್ಷಣೆ] ಸ್ಕ್ರಾಲ್ ನಿಲ್ಲಿಸಿ! ಹೆಚ್ಚುವರಿ ಆದಾಯದ ಸರಳ ದಾರಿ ಇಲ್ಲಿದೆ. "
+            f"[3-24s ಹಂತಗಳು] 1) ನಿಮ್ಮ ಕೌಶಲ್ಯ ಆಯ್ಕೆ ಮಾಡಿ, 2) ಪ್ರತಿದಿನ ಸಣ್ಣ ಮಟ್ಟದಲ್ಲಿ ಅಭ್ಯಾಸ ಮಾಡಿ, 3) ಫಲಿತಾಂಶ ಗಮನಿಸಿ ಮುಂದುವರಿಯಿರಿ. "
+            f"[24-30s ಕರೆ] ಈ ರೀಲ್ ಸೇವ್ ಮಾಡಿ ಮತ್ತು ಕನ್ನಡ ವಿಡಿಯೋಗಳಿಗಾಗಿ ಫಾಲೋ ಮಾಡಿ!"
         )
         st.rerun()
+
+    if st.session_state.style_blueprint:
+        st.caption(f"🎯 Style Recreation Blueprint / ಶೈಲಿ ನೀಲನಕ್ಷೆ: {st.session_state.style_blueprint}")
 
     s_col1, s_col2 = st.columns(2)
     st.session_state.script_kn = s_col1.text_area(
         "Kannada Script (ಕನ್ನಡ ಸ್ಕ್ರಿಪ್ಟ್ — Main Voice)",
         value=st.session_state.script_kn,
-        height=130,
+        height=135,
     )
     st.session_state.script_en = s_col2.text_area(
         "English Script (ಇಂಗ್ಲಿಷ್ ಸ್ಕ್ರಿಪ್ಟ್ — Reference & Bilingual SRT)",
         value=st.session_state.script_en,
-        height=130,
+        height=135,
     )
 
     v1, v2 = st.columns(2)
@@ -455,28 +625,49 @@ with t3:
         st.rerun()
 
 with t4:
-    st.subheader("Download Files / ಫೈಲ್‌ಗಳನ್ನು ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ")
+    st.subheader("Render Video & Download Files / ವಿಡಿಯೋ ರೆಂಡರ್ ಮತ್ತು ಡೌನ್‌ಲೋಡ್")
+    if st.button("🎬 Render MP4 Clip (Scenes + Kannada Audio) / MP4 ವಿಡಿಯೋ ರಚಿಸಿ"):
+        with st.spinner("Rendering MP4 clip / ವಿಡಿಯೋ ರಚಿಸಲಾಗುತ್ತಿದೆ..."):
+            mp4_out = render_mp4_from_scenes(st.session_state.scenes, st.session_state.generated_audio)
+            if mp4_out:
+                st.session_state.final_video_bytes = mp4_out
+                st.success("MP4 rendered! / MP4 ಸಿದ್ಧವಾಗಿದೆ!")
+                st.rerun()
+            else:
+                st.info(
+                    "Add at least one scene and ensure `imageio` + `imageio-ffmpeg` are in `requirements.txt` for MP4 export, "
+                    "or download the script, bilingual SRT, and Kannada MP3 voiceover below."
+                )
+
     combined_txt = (
+        f"=== STYLE BLUEPRINT / ಶೈಲಿ ===\n{st.session_state.style_blueprint}\n\n"
         f"=== KANNADA / ಕನ್ನಡ ===\n{st.session_state.script_kn}\n\n"
         f"=== ENGLISH / ಇಂಗ್ಲಿಷ್ ===\n{st.session_state.script_en}\n"
     )
-    d1, d2, d3 = st.columns(3)
+    d1, d2, d3, d4 = st.columns(4)
     if combined_txt.strip():
         d1.download_button(
-            "⬇️ Bilingual Script / ಸ್ಕ್ರಿಪ್ಟ್ (.txt)",
+            "⬇️ Script (.txt) / ಸ್ಕ್ರಿಪ್ಟ್",
             data=combined_txt.encode("utf-8"),
             file_name="bilingual_script_en_kn.txt",
         )
     if st.session_state.subtitles_bilingual:
         d2.download_button(
-            "⬇️ Bilingual Subtitles / ಉಪಶೀರ್ಷಿಕೆ (.srt)",
+            "⬇️ Subtitles (.srt) / ಉಪಶೀರ್ಷಿಕೆ",
             data=st.session_state.subtitles_bilingual.encode("utf-8"),
             file_name="bilingual_subtitles_en_kn.srt",
         )
     if st.session_state.generated_audio:
         d3.download_button(
-            "⬇️ Kannada Voice / ಕನ್ನಡ ಧ್ವನಿ (.mp3)",
+            "⬇️ Kannada Voice (.mp3) / ಧ್ವನಿ",
             data=st.session_state.generated_audio,
             file_name="kannada_voiceover.mp3",
             mime="audio/mpeg",
+        )
+    if st.session_state.final_video_bytes:
+        d4.download_button(
+            "⬇️ Video (.mp4) / ವಿಡಿಯೋ",
+            data=st.session_state.final_video_bytes,
+            file_name="creator_hub_kannada_en.mp4",
+            mime="video/mp4",
         )
