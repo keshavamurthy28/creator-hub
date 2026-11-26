@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import os
+import re
 import subprocess
 import tempfile
 import streamlit as st
@@ -56,6 +57,13 @@ st.markdown(
         color: #ffe082;
         font-size: 15px;
       }
+      .scene-card {
+        background: #121722;
+        border: 1px solid #253046;
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -81,8 +89,10 @@ defaults = {
     "voice_lang": "Kannada (ಕನ್ನಡ)",
     "subtitles_srt": "",
     "pulled_video_path": None,
+    "story_beats": [],
     "scenes": [],
     "scene_labels": [],
+    "target_scene_count": 6,
     "generated_audio": None,
     "final_video_bytes": None,
     "jump_sec": 0.0,
@@ -140,8 +150,8 @@ def translate_text_free(text: str, source_lang: str, target_lang: str) -> str:
         pass
 
     if target_lang == "kn":
-        return f"ಕನ್ನಡ ಅನುವಾದ ({clean[:60]}): ಸ್ಮಾರ್ಟ್ ಕಥೆ ಮತ್ತು ಪ್ರಾಯೋಗಿಕ ಮಾರ್ಗದರ್ಶನ."
-    return f"English translation ({clean[:60]}): Practical story and step-by-step guidance."
+        return f"ಕನ್ನಡ ಅನುವಾದ ({clean[:60]}): ಕಥೆಯ ಮುಂದಿನ ದೃಶ್ಯ."
+    return f"English translation ({clean[:60]}): Next scene of the story."
 
 
 def load_subtitle_font(size: int = 32):
@@ -157,6 +167,103 @@ def load_subtitle_font(size: int = 32):
             except Exception:
                 pass
     return ImageFont.load_default()
+
+
+def expand_draft_into_scenes(draft_text: str, max_scenes: int = 10) -> list[str]:
+    """Splits a draft story into sequential scene beats and extends smoothly up to max_scenes."""
+    raw = (draft_text or "").strip()
+    if not raw:
+        raw = "Village farming story with coconut and sugarcane."
+
+    parts = [
+        p.strip(" .!?,;:-")
+        for p in re.split(r"[.!?\n।]+", raw)
+        if p.strip(" .!?,;:-")
+    ]
+    if not parts:
+        parts = [raw]
+
+    # If the draft has fewer beats than max_scenes, expand clauses or progression beats
+    expanded: list[str] = []
+    for part in parts:
+        sub_clauses = [c.strip() for c in re.split(r"\s+(?:and|then|while|with|but|ಮತ್ತು|ಹಾಗೂ|ನಂತರ)\s+", part) if c.strip()]
+        if len(sub_clauses) > 1 and len(expanded) + len(sub_clauses) <= max_scenes:
+            expanded.extend(sub_clauses)
+        else:
+            expanded.append(part)
+
+    progression_angles = [
+        "Opening establishing scene",
+        "Character action and daily routine",
+        "Close-up detail and effort",
+        "Environment mood and surroundings",
+        "Turning point in the story",
+        "Progress and steady growth",
+        "Community and family moment",
+        "Resolution and positive takeaway",
+        "Closing reflection shot",
+        "Final summary frame",
+    ]
+
+    idx = 0
+    while len(expanded) < max_scenes:
+        base_beat = expanded[idx % len(expanded)]
+        angle = progression_angles[len(expanded) % len(progression_angles)]
+        expanded.append(f"{base_beat} — {angle}")
+        idx += 1
+
+    return expanded[:max_scenes]
+
+
+def build_storyboard_slide(beat_text: str, scene_num: int, total_scenes: int) -> Image.Image:
+    """Creates a clean storyboard card from a draft beat (no stick figures)."""
+    w, h = 1280, 720
+    palettes = [
+        ((18, 34, 56), (98, 210, 165)),
+        ((24, 44, 48), (255, 204, 102)),
+        ((34, 28, 58), (130, 198, 255)),
+        ((46, 34, 24), (255, 178, 102)),
+    ]
+    bg, accent = palettes[(scene_num - 1) % len(palettes)]
+    img = Image.new("RGB", (w, h), bg)
+    draw = ImageDraw.Draw(img)
+    font_sub = load_subtitle_font(30)
+
+    # Frame border & header strip
+    draw.rounded_rectangle([36, 36, w - 36, h - 36], radius=18, outline=accent, width=3)
+    draw.rectangle([56, 56, w - 56, 118], fill=(12, 16, 26))
+    draw.text((78, 74), f"SCENE {scene_num} OF {total_scenes}  |  DRAFT STORYBOARD", fill=accent)
+
+    # Wrap beat text cleanly across lines
+    words = beat_text.split()
+    lines = []
+    cur = ""
+    for word in words:
+        test = f"{cur} {word}".strip()
+        if len(test) <= 52:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+
+    y_pos = 210
+    for line in lines[:5]:
+        draw.rectangle([76, y_pos - 6, w - 76, y_pos + 42], fill=(15, 21, 34))
+        draw.text((92, y_pos + 2), line, fill=(245, 248, 252), font=font_sub)
+        y_pos += 58
+
+    draw.text((78, h - 84), "Ready for voiceover, Kannada subtitles, and timeline editing", fill=(185, 200, 220))
+    return img
+
+
+def sync_scenes_to_count(draft_text: str, count: int):
+    beats = expand_draft_into_scenes(draft_text, max_scenes=count)
+    st.session_state.story_beats = beats
+    st.session_state.scenes = [build_storyboard_slide(b, i + 1, len(beats)) for i, b in enumerate(beats)]
+    st.session_state.scene_labels = [b[:48] for b in beats]
 
 
 async def generate_tts_and_srt(text: str, voice: str, rate: str, pitch: str):
@@ -334,7 +441,7 @@ with screen_col:
             render_video_player_html(vf.read(), st.session_state.jump_sec, st.session_state.speed)
     elif st.session_state.scenes:
         preview_img = apply_inshot_frame_edits(st.session_state.scenes[-1])
-        st.image(preview_img, caption="Live Studio Monitor", use_container_width=True)
+        st.image(preview_img, caption=f"Live Scene Monitor ({len(st.session_state.scenes)} scene(s))", use_container_width=True)
     else:
         st.markdown(
             """
@@ -344,7 +451,7 @@ with screen_col:
               <div style="font-size:38px;">🎞️</div>
               <div style="font-size:17px;margin-top:8px;"><b>Monitor Ready</b></div>
               <div style="font-size:13px;opacity:0.85;margin-top:4px;">
-                Upload your images/videos or pull a video link below to start editing
+                Write your draft story to build scenes up to 10+, upload media, or pull a video link below
               </div>
             </div>
             """,
@@ -430,57 +537,71 @@ st.divider()
 # WORKFLOW TABS (100% ENGLISH INTERFACE)
 # ==============================================================================
 t1, t2, t3, t4 = st.tabs([
-    "📁 Media & Link Pull",
+    "🎬 Storyboard & Scenes (Up to 10+)",
     "📜 Script & Voice (Kannada / English)",
-    "🖼️ Uploaded Scenes",
+    "🔗 Media & Link Pull",
     "📥 Render & Export",
 ])
 
 with t1:
-    st.subheader("Pull Video from Link or Upload Your Images & Videos")
-    url_in = st.text_input("Direct Video Link (YouTube / Instagram / Facebook)")
-    if st.button("⬇️ Pull Video from Link"):
-        if not HAS_YTDLP:
-            st.error("Add `yt-dlp` to `requirements.txt`.")
-        elif url_in.strip():
-            with st.spinner("Fetching video..."):
-                try:
-                    tmp_d = tempfile.mkdtemp(prefix="kkm_dl_")
-                    opts = {
-                        "outtmpl": os.path.join(tmp_d, "%(title).50s.%(ext)s"),
-                        "format": "best[ext=mp4]/best",
-                        "noplaylist": True,
-                        "quiet": True,
-                    }
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(url_in.strip(), download=True)
-                        p = ydl.prepare_filename(info)
-                    st.session_state.pulled_video_path = p
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Link pull failed: {exc}")
-
-    uploads = st.file_uploader(
-        "Drag & Drop Your Images or Videos",
-        type=["png", "jpg", "jpeg", "webp", "mp4", "mov"],
-        accept_multiple_files=True,
+    st.subheader("Develop Scenes from Draft Story (Extend up to 10+ Scenes)")
+    draft_input = st.text_area(
+        "Draft Story (English or Kannada)",
+        value=st.session_state.script_en or st.session_state.script_kn,
+        height=120,
+        placeholder="Write your draft story here and generate scenes step by step...",
     )
-    if uploads:
-        for f in uploads:
-            if f.type.startswith("image/"):
-                st.session_state.scenes.append(Image.open(f).convert("RGB"))
-                st.session_state.scene_labels.append(f.name)
-            elif f.type.startswith("video/"):
-                st.session_state.final_video_bytes = f.getvalue()
+
+    s_col1, s_col2, s_col3 = st.columns([2, 1, 1])
+    target_n = s_col1.slider(
+        "Number of Scenes",
+        min_value=1,
+        max_value=12,
+        value=int(st.session_state.target_scene_count),
+    )
+    st.session_state.target_scene_count = target_n
+
+    if s_col2.button("✨ Build Scenes from Draft", type="primary"):
+        source_draft = draft_input.strip() or st.session_state.script_kn.strip() or st.session_state.script_en.strip()
+        if not st.session_state.script_en and source_draft:
+            st.session_state.script_en = source_draft
+        sync_scenes_to_count(source_draft, target_n)
         st.rerun()
+
+    if s_col3.button("➕ Add Scene (+1)"):
+        next_count = min(15, max(len(st.session_state.scenes) + 1, target_n + 1))
+        st.session_state.target_scene_count = next_count
+        source_draft = draft_input.strip() or st.session_state.script_kn.strip() or st.session_state.script_en.strip()
+        sync_scenes_to_count(source_draft, next_count)
+        st.rerun()
+
+    if st.session_state.scenes:
+        st.markdown(f"**Generated Storyboard Scenes: {len(st.session_state.scenes)}**")
+        for start_i in range(0, len(st.session_state.scenes), 4):
+            row_cols = st.columns(4)
+            for offset in range(4):
+                idx = start_i + offset
+                if idx < len(st.session_state.scenes):
+                    with row_cols[offset]:
+                        st.image(
+                            st.session_state.scenes[idx],
+                            caption=f"Scene {idx + 1}: {st.session_state.scene_labels[idx]}",
+                            use_container_width=True,
+                        )
+                        if st.button("👁️ Preview", key=f"prev_sc_{idx}"):
+                            st.session_state.scenes.append(st.session_state.scenes[idx])
+                            st.session_state.scene_labels.append(st.session_state.scene_labels[idx])
+                            st.rerun()
+    else:
+        st.info("Enter your draft story above and click 'Build Scenes from Draft' to create scenes up to 10 or more.")
 
 with t2:
     st.subheader("Two-Way Script Sync (English ↔ Kannada) & Kannada / English Voiceover")
-    topic_in = st.text_input("Reel / Story Topic", "3 smart second-income habits in 30 seconds")
-    if st.button("📝 Generate Starter Script"):
+    topic_in = st.text_input("Story / Reel Topic", "A village farmer growing coconut and sugarcane and living happily")
+    if st.button("📝 Create Story Draft"):
         st.session_state.script_en = (
-            f"Stop scrolling! Here is a 30-second guide on {topic_in}: "
-            f"pick one practical skill, stay consistent every day, and grow step by step."
+            f"{topic_in}. He wakes up early in the village, tends his coconut palms and sugarcane fields, "
+            f"works steadily through every season, and enjoys a peaceful life with his family."
         )
         st.session_state.script_kn = translate_text_free(st.session_state.script_en, "en", "kn")
         st.rerun()
@@ -542,15 +663,42 @@ with t2:
                 st.rerun()
 
 with t3:
-    st.subheader("Uploaded Image Scenes")
-    if st.session_state.scenes:
-        cols = st.columns(min(4, len(st.session_state.scenes)))
-        for idx, sc in enumerate(st.session_state.scenes[-4:]):
-            lbl = st.session_state.scene_labels[-4:][idx]
-            with cols[idx]:
-                st.image(sc, caption=f"Scene {idx + 1}: {lbl}", use_container_width=True)
-    else:
-        st.info("Upload images under 'Media & Link Pull' to preview and arrange scenes here.")
+    st.subheader("Pull Video from Link or Upload Your Images & Videos")
+    url_in = st.text_input("Direct Video Link (YouTube / Instagram / Facebook)")
+    if st.button("⬇️ Pull Video from Link"):
+        if not HAS_YTDLP:
+            st.error("Add `yt-dlp` to `requirements.txt`.")
+        elif url_in.strip():
+            with st.spinner("Fetching video..."):
+                try:
+                    tmp_d = tempfile.mkdtemp(prefix="kkm_dl_")
+                    opts = {
+                        "outtmpl": os.path.join(tmp_d, "%(title).50s.%(ext)s"),
+                        "format": "best[ext=mp4]/best",
+                        "noplaylist": True,
+                        "quiet": True,
+                    }
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(url_in.strip(), download=True)
+                        p = ydl.prepare_filename(info)
+                    st.session_state.pulled_video_path = p
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Link pull failed: {exc}")
+
+    uploads = st.file_uploader(
+        "Drag & Drop Your Images or Videos",
+        type=["png", "jpg", "jpeg", "webp", "mp4", "mov"],
+        accept_multiple_files=True,
+    )
+    if uploads:
+        for f in uploads:
+            if f.type.startswith("image/"):
+                st.session_state.scenes.append(Image.open(f).convert("RGB"))
+                st.session_state.scene_labels.append(f.name)
+            elif f.type.startswith("video/"):
+                st.session_state.final_video_bytes = f.getvalue()
+        st.rerun()
 
 with t4:
     st.subheader("Render Video & Download Assets")
@@ -562,7 +710,7 @@ with t4:
                 st.success("MP4 video rendered!")
                 st.rerun()
             else:
-                st.info("Upload at least one image scene and ensure `imageio` and `imageio-ffmpeg` are in `requirements.txt`.")
+                st.info("Build or upload at least one scene first and ensure `imageio` and `imageio-ffmpeg` are in `requirements.txt`.")
 
     active_script_txt = (
         st.session_state.script_kn
