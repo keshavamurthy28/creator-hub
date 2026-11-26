@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import math
 import os
 import re
 import subprocess
@@ -82,7 +83,6 @@ VOICE_CATALOG = {
     },
 }
 
-# --- SESSION STATE ---
 defaults = {
     "draft_input": "",
     "scene_items": [],
@@ -112,7 +112,7 @@ defaults = {
     "transition": "Crossfade",
     "easing": "Ease-In-Out",
     "sticker_text": "✨🎬",
-    "subtitle_line": "",
+    "subtitle_line": "ಕನ್ನಡ ಕಥೆ · Story Scene",
     "collage_mode": "Single View",
     "bg_remove": False,
 }
@@ -155,41 +155,64 @@ def translate_text_free(text: str, source_lang: str, target_lang: str) -> str:
     return clean
 
 
-def load_font(size: int = 30, prefer_kannada: bool = False):
-    kn_paths = [
+def find_font_path(prefer_kannada: bool = True) -> str | None:
+    kn_candidates = [
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansKannada-Regular.otf",
+        "/usr/share/fonts/truetype/lohit-kannada/Lohit-Kannada.ttf",
+        "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Tunga.ttf",
     ]
-    latin_paths = [
+    latin_candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
     ]
-    ordered = (kn_paths + latin_paths) if prefer_kannada else (latin_paths + kn_paths)
-    for path in ordered:
+    pool = (kn_candidates + latin_candidates) if prefer_kannada else (latin_candidates + kn_candidates)
+    for path in pool:
         if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size=size)
-            except Exception:
-                pass
+            return path
+    return None
+
+
+def load_font(size: int = 30, prefer_kannada: bool = True):
+    path = find_font_path(prefer_kannada=prefer_kannada)
+    if path:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            pass
     return ImageFont.load_default()
 
 
-def has_kannada_font() -> bool:
-    for path in (
-        "/usr/share/fonts/truetype/noto/NotoSansKannada-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
-    ):
-        if os.path.exists(path):
-            return True
-    return False
+def wrap_lines(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_lines: int = 4) -> list[str]:
+    clean = " ".join((text or "").split())
+    if not clean:
+        return []
+    words = clean.split(" ")
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        candidate = f"{cur} {w}".strip()
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            cur = candidate
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+            if len(lines) >= max_lines:
+                break
+    if cur and len(lines) < max_lines:
+        lines.append(cur)
+    return lines
 
 
 def develop_scenes_from_draft(draft_text: str, target_scenes: int = 6) -> list[dict]:
-    """Develops raw draft thoughts into structured scene writing entries up to target_scenes."""
     raw = (draft_text or "").strip()
     if not raw:
-        raw = "A villager tends coconut palms and sugarcane in the morning and builds a peaceful life."
+        raw = "Village farmer tending coconut palms and sugarcane fields and living happily."
 
     raw_sentences = [
         s.strip(" .!?,;:-")
@@ -236,66 +259,93 @@ def develop_scenes_from_draft(draft_text: str, target_scenes: int = 6) -> list[d
     beats = beats[:target_scenes]
     items = []
     for i, b in enumerate(beats):
+        kn_b = translate_text_free(b, "en", "kn") if b.isascii() else b
         items.append({
             "scene_no": i + 1,
             "narration": b,
-            "visual_prompt": f"Animated scene {i + 1}: {b}",
+            "kannada_line": kn_b,
+            "visual_prompt": b,
             "motion": st.session_state.anim_preset,
         })
     return items
 
 
 def render_scene_frame(scene_info: dict, total_scenes: int) -> Image.Image:
-    """Creates a clean animated scene frame without broken Kannada glyph boxes."""
+    """Generates a visual scene image from description with Kannada & English scene text."""
     w, h = 1280, 720
     idx = max(0, int(scene_info.get("scene_no", 1)) - 1)
+    desc = (scene_info.get("visual_prompt") or scene_info.get("narration") or "").strip()
+    kn_text = (scene_info.get("kannada_line") or "").strip()
+    if not kn_text and desc:
+        kn_text = desc if not desc.isascii() else translate_text_free(desc, "en", "kn")
+
     palettes = [
-        ((16, 32, 54), (92, 214, 168)),
-        ((24, 42, 46), (255, 202, 98)),
-        ((32, 26, 56), (132, 198, 255)),
-        ((46, 33, 22), (255, 174, 96)),
+        ((24, 54, 88), (74, 148, 214), (34, 92, 58), (255, 206, 102)),
+        ((42, 34, 72), (108, 86, 168), (28, 76, 68), (255, 184, 118)),
+        ((20, 62, 74), (62, 156, 168), (44, 98, 48), (255, 218, 128)),
+        ((56, 36, 32), (168, 96, 72), (46, 86, 44), (255, 196, 104)),
     ]
-    bg, accent = palettes[idx % len(palettes)]
-    img = Image.new("RGB", (w, h), bg)
+    sky_top, sky_bot, ground_col, sun_col = palettes[idx % len(palettes)]
+
+    img = Image.new("RGB", (w, h), sky_top)
     draw = ImageDraw.Draw(img)
-    font_title = load_font(34, prefer_kannada=False)
-    font_body = load_font(28, prefer_kannada=False)
 
-    draw.rounded_rectangle([32, 32, w - 32, h - 32], radius=18, outline=accent, width=3)
-    draw.rectangle([52, 52, w - 52, 114], fill=(12, 16, 26))
-    draw.text(
-        (72, 68),
-        f"SCENE {scene_info.get('scene_no', 1)} / {total_scenes}   •   MOTION: {scene_info.get('motion', 'Zoom')}",
-        fill=accent,
-        font=font_title,
-    )
+    # Vertical sky gradient + sun/glow + layered hills & horizon
+    horizon_y = 435
+    for y in range(horizon_y):
+        ratio = y / max(1, horizon_y)
+        r = int(sky_top[0] * (1 - ratio) + sky_bot[0] * ratio)
+        g = int(sky_top[1] * (1 - ratio) + sky_bot[1] * ratio)
+        b = int(sky_top[2] * (1 - ratio) + sky_bot[2] * ratio)
+        draw.line([(0, y), (w, y)], fill=(r, g, b))
 
-    desc = scene_info.get("visual_prompt") or scene_info.get("narration") or ""
-    # Safe ASCII display on canvas so missing Kannada fonts never draw boxes
-    safe_desc = desc.encode("ascii", "ignore").decode("ascii").strip()
-    if not safe_desc:
-        safe_desc = f"Scene {scene_info.get('scene_no', 1)} Story Frame"
+    sun_x = 220 + ((idx * 190) % 780)
+    sun_y = 165 + ((idx * 25) % 70)
+    for rad, alpha_tint in [(96, (90, 82, 58)), (64, (165, 142, 82)), (42, sun_col)]:
+        draw.ellipse([sun_x - rad, sun_y - rad, sun_x + rad, sun_y + rad], fill=alpha_tint)
 
-    words = safe_desc.split()
-    lines, cur = [], ""
-    for word in words:
-        test = f"{cur} {word}".strip()
-        if len(test) <= 56:
-            cur = test
-        else:
-            if cur:
-                lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+    # Distant ridge & foreground ground
+    ridge_pts = [(0, horizon_y)]
+    for x in range(0, w + 80, 80):
+        ry = horizon_y - int(48 + 32 * math.sin(x * 0.008 + idx))
+        ridge_pts.append((x, ry))
+    ridge_pts.extend([(w, horizon_y), (w, h), (0, h)])
+    draw.polygon(ridge_pts, fill=ground_col)
+    draw.rectangle([0, horizon_y + 22, w, h], fill=(
+        max(10, ground_col[0] - 8),
+        max(10, ground_col[1] - 6),
+        max(10, ground_col[2] - 4),
+    ))
 
-    y = 195
-    for line in lines[:5]:
-        draw.rounded_rectangle([72, y - 6, w - 72, y + 42], radius=8, fill=(14, 20, 32))
-        draw.text((90, y + 2), line, fill=(242, 246, 252), font=font_body)
-        y += 58
+    font_badge = load_font(24, prefer_kannada=False)
+    font_en = load_font(28, prefer_kannada=False)
+    font_kn = load_font(32, prefer_kannada=True)
 
-    draw.text((72, h - 82), "Animated Frame Ready  |  Kannada & English Voice/Subtitles Supported", fill=(180, 198, 220), font=font_body)
+    # Top scene header & progress bar
+    draw.rounded_rectangle([36, 28, w - 36, 76], radius=12, fill=(12, 16, 26))
+    draw.text((56, 39), f"SCENE {idx + 1} OF {total_scenes}  |  {scene_info.get('motion', 'Motion')}", fill=sun_col, font=font_badge)
+
+    # Description card
+    draw.rounded_rectangle([54, 104, w - 54, 248], radius=14, fill=(13, 18, 29), outline=sun_col, width=2)
+    en_lines = wrap_lines(draw, desc, font_en, w - 140, max_lines=3)
+    cy = 118
+    for line in en_lines:
+        draw.text((76, cy), line, fill=(242, 246, 252), font=font_en)
+        cy += 40
+
+    # Kannada + English caption banner at bottom of scene
+    draw.rounded_rectangle([54, 495, w - 54, 676], radius=14, fill=(12, 15, 23), outline=(92, 156, 224), width=2)
+    if kn_text:
+        kn_lines = wrap_lines(draw, kn_text, font_kn, w - 140, max_lines=2)
+        ky = 510
+        for kl in kn_lines:
+            draw.text((76, ky), kl, fill=(255, 224, 130), font=font_kn)
+            ky += 44
+    if desc:
+        sub_en_lines = wrap_lines(draw, desc, font_badge, w - 140, max_lines=1)
+        if sub_en_lines:
+            draw.text((76, 612), sub_en_lines[0], fill=(196, 214, 238), font=font_badge)
+
     return img
 
 
@@ -382,17 +432,20 @@ def apply_frame_edits(img: Image.Image) -> Image.Image:
     w, h = out.size
     sub_txt = st.session_state.subtitle_line.strip()
     if sub_txt:
-        if has_kannada_font() or sub_txt.isascii():
-            font_sub = load_font(28, prefer_kannada=True)
-            box_w = min(w - 80, max(360, len(sub_txt) * 18 + 60))
-            bx0 = (w - box_w) // 2
-            by0 = h - 120
-            draw.rounded_rectangle([bx0, by0, bx0 + box_w, by0 + 64], radius=10, fill=(14, 15, 20))
-            draw.text((bx0 + 22, by0 + 16), sub_txt[:75], fill=(255, 255, 255), font=font_sub)
+        font_sub = load_font(28, prefer_kannada=True)
+        lines = wrap_lines(draw, sub_txt, font_sub, w - 160, max_lines=2)
+        if lines:
+            box_h = 34 * len(lines) + 22
+            bx0, by0 = 90, h - box_h - 24
+            draw.rounded_rectangle([bx0, by0, w - 90, by0 + box_h], radius=10, fill=(14, 15, 20))
+            ty = by0 + 10
+            for ln in lines:
+                draw.text((bx0 + 22, ty), ln, fill=(255, 240, 150), font=font_sub)
+                ty += 34
 
     sticker_ascii = st.session_state.sticker_text.encode("ascii", "ignore").decode("ascii").strip()
     if sticker_ascii:
-        draw.text((max(20, w - 180), 42), sticker_ascii, fill=(255, 230, 120), font=load_font(26, prefer_kannada=False))
+        draw.text((max(20, w - 180), 86), sticker_ascii, fill=(255, 230, 120), font=load_font(24, prefer_kannada=False))
     return out
 
 
@@ -437,9 +490,6 @@ def render_final_mp4(scenes: list[Image.Image], audio_bytes: bytes | None) -> tu
             all_frames.extend(
                 build_animated_frames(edited, st.session_state.anim_preset, num_frames=st.session_state.anim_frames)
             )
-        if st.session_state.transition == "Crossfade" and len(all_frames) > 4:
-            all_frames = all_frames[::1]  # Smooth sequence
-
         tmp_dir = tempfile.mkdtemp(prefix="kkm_studio_render_")
         raw_mp4 = os.path.join(tmp_dir, "raw_video.mp4")
         iio.imwrite(raw_mp4, all_frames, fps=st.session_state.anim_fps, codec="libx264")
@@ -565,7 +615,7 @@ with side_col:
 st.divider()
 
 # ==============================================================================
-# 4 CORE WORKFLOW TABS (SCRIPT • VIDEO • VOICE • RENDER & DOWNLOAD)
+# 4 CORE WORKFLOW TABS
 # ==============================================================================
 tab_script, tab_video, tab_voice, tab_render = st.tabs([
     "1. Script & Story Builder",
@@ -574,7 +624,7 @@ tab_script, tab_video, tab_voice, tab_render = st.tabs([
     "4. Render & Download",
 ])
 
-# --- TAB 1: SCRIPT TAB (DRAFT -> SCENE WRITING -> CORRECTION & FINALIZE) ---
+# --- TAB 1: SCRIPT TAB ---
 with tab_script:
     st.subheader("Draft Story to Scene Writing & Finalization")
     st.session_state.draft_input = st.text_area(
@@ -602,10 +652,13 @@ with tab_script:
             current_items = develop_scenes_from_draft(st.session_state.draft_input, target_scenes=1)
         else:
             next_num = len(current_items) + 1
+            base_txt = st.session_state.draft_input.strip() or f"Scene {next_num} continuation"
+            kn_txt = translate_text_free(base_txt, "en", "kn") if base_txt.isascii() else base_txt
             current_items.append({
                 "scene_no": next_num,
-                "narration": f"Scene {next_num} continuation from draft",
-                "visual_prompt": f"Animated scene {next_num}: {st.session_state.draft_input[:60]}",
+                "narration": base_txt,
+                "kannada_line": kn_txt,
+                "visual_prompt": base_txt,
                 "motion": st.session_state.anim_preset,
             })
         sync_storyboard_to_scenes(current_items)
@@ -616,20 +669,26 @@ with tab_script:
         updated_items = []
         for idx, item in enumerate(st.session_state.scene_items):
             st.markdown('<div class="scene-row">', unsafe_allow_html=True)
-            r1, r2 = st.columns([2, 2])
+            r1, r2, r3 = st.columns([2, 2, 2])
             new_narr = r1.text_input(
                 f"Scene {idx + 1} Story / Narration",
                 value=item["narration"],
                 key=f"sc_narr_{idx}",
             )
-            new_vis = r2.text_input(
-                f"Scene {idx + 1} Animation / Visual Description",
+            new_kn = r2.text_input(
+                f"Scene {idx + 1} Kannada Words / Subtitle",
+                value=item.get("kannada_line", ""),
+                key=f"sc_kn_{idx}",
+            )
+            new_vis = r3.text_input(
+                f"Scene {idx + 1} Scene Image Description",
                 value=item["visual_prompt"],
                 key=f"sc_vis_{idx}",
             )
             updated_items.append({
                 "scene_no": idx + 1,
                 "narration": new_narr,
+                "kannada_line": new_kn,
                 "visual_prompt": new_vis,
                 "motion": item.get("motion", st.session_state.anim_preset),
             })
@@ -638,7 +697,11 @@ with tab_script:
         if st.button("✅ Save Corrections & Finalize Story", type="primary"):
             sync_storyboard_to_scenes(updated_items)
             st.session_state.script_en = st.session_state.finalized_story
-            st.session_state.script_kn = translate_text_free(st.session_state.finalized_story, "en", "kn")
+            st.session_state.script_kn = "\n".join(
+                [f"ದೃಶ್ಯ {it['scene_no']}: {it.get('kannada_line') or it['narration']}" for it in updated_items]
+            )
+            if updated_items and updated_items[0].get("kannada_line"):
+                st.session_state.subtitle_line = updated_items[0]["kannada_line"]
             st.success("Story finalized and synced to scenes and scripts.")
             st.rerun()
 
@@ -656,9 +719,9 @@ with tab_script:
         st.session_state.script_en = translate_text_free(st.session_state.script_kn, "kn", "en")
         st.rerun()
 
-# --- TAB 2: VIDEO & ANIMATION TAB (UPLOAD, URL, ANIMATED DESCRIPTION + TAB EDITS) ---
+# --- TAB 2: VIDEO & ANIMATION TAB ---
 with tab_video:
-    st.subheader("Source Media & Animation Creator")
+    st.subheader("Source Media & Scene Image Generator")
     v_in1, v_in2 = st.columns(2)
 
     with v_in1:
@@ -703,28 +766,40 @@ with tab_video:
             st.rerun()
 
     st.divider()
-    st.markdown("##### Create Animated Scene from Description")
+    st.markdown("##### Create Scene Image from Description")
     a_col1, a_col2, a_col3 = st.columns([2, 1, 1])
     anim_desc = a_col1.text_input(
-        "Animated Image / Video Description",
-        value=st.session_state.scene_items[0]["visual_prompt"] if st.session_state.scene_items else "Animated scene with smooth camera movement",
+        "Scene Image Description",
+        value=st.session_state.scene_items[0]["visual_prompt"] if st.session_state.scene_items else "Village farmer tending coconut and sugarcane fields",
+    )
+    kn_scene_words = st.text_input(
+        "Kannada Words / Subtitles on Scene Image",
+        value=st.session_state.subtitle_line,
     )
     st.session_state.anim_preset = a_col2.selectbox(
-        "Animation Style",
+        "Motion Preset",
         ["Ken Burns Zoom-In", "Ken Burns Pan-Right", "Parallax Drift", "Ken Burns Zoom-Out", "Pulse", "Static"],
     )
-    st.session_state.anim_frames = a_col3.slider("Animation Frames per Scene", 4, 24, int(st.session_state.anim_frames))
+    st.session_state.anim_frames = a_col3.slider("Motion Frames per Scene", 4, 24, int(st.session_state.anim_frames))
 
-    if st.button("🎞️ Create Animated Scene", type="primary"):
+    if st.button("🖼️ Generate Scene Image", type="primary"):
         next_no = len(st.session_state.scenes) + 1
-        new_entry = {"scene_no": next_no, "narration": anim_desc, "visual_prompt": anim_desc, "motion": st.session_state.anim_preset}
+        kn_clean = kn_scene_words.strip() or (anim_desc.strip() if not anim_desc.strip().isascii() else translate_text_free(anim_desc.strip(), "en", "kn"))
+        new_entry = {
+            "scene_no": next_no,
+            "narration": anim_desc.strip(),
+            "kannada_line": kn_clean,
+            "visual_prompt": anim_desc.strip(),
+            "motion": st.session_state.anim_preset,
+        }
         frame_img = render_scene_frame(new_entry, max(next_no, len(st.session_state.scene_items) or 1))
         st.session_state.scenes.append(frame_img)
-        st.session_state.scene_labels.append(f"Anim {next_no}: {anim_desc[:32]}")
+        st.session_state.scene_labels.append(f"Scene {next_no}: {anim_desc.strip()[:32]}")
+        st.session_state.subtitle_line = kn_clean
         st.rerun()
 
     st.divider()
-    st.markdown("##### Video & Animation Editing Tools")
+    st.markdown("##### Video & Scene Editing Tools")
     em1, em2, em3, em4 = st.columns(4)
     if em1.button("⚡ Motion & Speed"):
         st.session_state.edit_mode = "Motion & Speed"
@@ -753,7 +828,7 @@ with tab_video:
         st.session_state.flip_h = ec4.checkbox("Mirror Flip", value=st.session_state.flip_h)
     else:
         ec1, ec2, ec3 = st.columns(3)
-        st.session_state.subtitle_line = ec1.text_input("Subtitle Overlay Text", value=st.session_state.subtitle_line)
+        st.session_state.subtitle_line = ec1.text_input("Subtitle Overlay Text (Kannada / English)", value=st.session_state.subtitle_line)
         st.session_state.sticker_text = ec2.text_input("Badge / Sticker", value=st.session_state.sticker_text)
         st.session_state.collage_mode = ec3.selectbox("Layout", ["Single View", "Side-by-Side (2)", "Grid (4)"])
 
@@ -765,7 +840,7 @@ with tab_video:
             with strip_cols[idx]:
                 st.image(apply_frame_edits(sc), caption=lbl, use_container_width=True)
 
-# --- TAB 3: VOICE TAB (UPLOAD, BUILT-IN KANNADA/ENGLISH, FROM URL) ---
+# --- TAB 3: VOICE TAB ---
 with tab_voice:
     st.subheader("Voiceover & Subtitles (Built-In Kannada / English, Upload, or URL)")
     v_src1, v_src2 = st.columns(2)
@@ -845,7 +920,7 @@ with tab_voice:
                     st.session_state.script_kn = clean_tts
                 else:
                     st.session_state.script_en = clean_tts
-                st.session_state.subtitle_line = clean_tts[:80]
+                st.session_state.subtitle_line = clean_tts
                 st.rerun()
 
     if st.session_state.generated_audio:
