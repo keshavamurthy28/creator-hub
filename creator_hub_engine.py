@@ -4,13 +4,12 @@ import os
 import random
 import re
 import time
-import urllib.parse
 from typing import Dict, List, Optional, Tuple
 
 import edge_tts
 import numpy as np
-import requests
 from deep_translator import GoogleTranslator
+from huggingface_hub import InferenceClient
 from moviepy.editor import (
     AudioFileClip,
     CompositeVideoClip,
@@ -21,23 +20,117 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
 # ---------------------------------------------------------------------------
-# 1. FREE TRANSLATION (English / Hindi -> Kannada or English)
+# PRESET STORIES (Hanuman + Custom / Survival)
 # ---------------------------------------------------------------------------
-def translate_text(text: str, target_lang: str = "kn") -> str:
-    """Free translation via deep-translator (no API key required)."""
+def get_preset_scenes(preset_name: str) -> List[Dict]:
+    if preset_name == "Hanuman Story (5 Chapters)":
+        return [
+            {
+                "chapter": "1. ಜನನ / Birth",
+                "script": "Lord Hanuman was born to Anjana and Kesari with the blessings of Vayu, the wind god.",
+                "prompt": "Divine newborn baby Hanuman glowing softly in sacred forest mountains at dawn, golden light rays, Indian mythological digital illustration, no text",
+                "motion": "zoom_in",
+                "duration": 4.5,
+            },
+            {
+                "chapter": "2. ಬಾಲ್ಯದ ಸಾಧನೆಗಳು / Baby Achievements",
+                "script": "As a child, Bal Hanuman leaped toward the radiant sun with fearless devotion and strength.",
+                "prompt": "Young Bal Hanuman flying through golden clouds toward a glowing sun in the sky, radiant aura, epic Indian mythological art, no text",
+                "motion": "pan_right",
+                "duration": 4.5,
+            },
+            {
+                "chapter": "3. ರಾಮಾಯಣ / Ramayana",
+                "script": "In the Ramayana, Hanuman crossed the ocean, found Sita, and served Lord Rama with supreme courage.",
+                "prompt": "Hanuman leaping across a vast ocean at sunrise toward distant mountains, golden aura, heroic Indian epic illustration, no text",
+                "motion": "ken_burns_diag",
+                "duration": 5.0,
+            },
+            {
+                "chapter": "4. ಮಹಾಭಾರತ / Mahabharata",
+                "script": "In the Mahabharata, Hanuman guided Bhima and protected Arjuna's chariot banner at Kurukshetra.",
+                "prompt": "Majestic Hanuman standing strong in sacred mountain mist with a glowing golden mace, ancient Indian epic art, no text",
+                "motion": "zoom_out",
+                "duration": 4.5,
+            },
+            {
+                "chapter": "5. ಇಂದಿನ ಸ್ಥಾನ / Where Is He Now?",
+                "script": "As an eternal Chiranjeevi, Hanuman remains ever-present wherever Rama's name is remembered in devotion.",
+                "prompt": "Serene Hanuman in peaceful meditation with glowing oil lamps in a sacred temple sanctuary, warm golden devotional art, no text",
+                "motion": "pan_left",
+                "duration": 5.0,
+            },
+        ]
+
+    # Default: Forest Survival Story
+    return [
+        {
+            "chapter": "1. ವಿಮಾನ ದುರಂತ / Flight Trouble",
+            "script": "Flight landed in forest due to problem and few dies because of that.",
+            "prompt": "Passenger airplane flying low over dense dark forest trees under stormy clouds, dramatic animation scene, no text",
+            "motion": "zoom_in",
+            "duration": 4.5,
+        },
+        {
+            "chapter": "2. ಬದುಕುಳಿದವರು / Survivors",
+            "script": "Few survives and overcome the hurdle finally and come back.",
+            "prompt": "Small group of exhausted survivors standing together in a misty jungle clearing at dawn, hopeful light rays, animated story art, no text",
+            "motion": "pan_right",
+            "duration": 4.5,
+        },
+        {
+            "chapter": "3. ಪ್ರಾಣಿಗಳ ಎದುರಿಸುವುದು / Fighting Animals",
+            "script": "How they fight animals using torches and teamwork in the wild.",
+            "prompt": "Survivors holding burning wooden torches around a campfire facing glowing animal eyes in a dark forest at night, dramatic animation, no text",
+            "motion": "ken_burns_diag",
+            "duration": 4.5,
+        },
+        {
+            "chapter": "4. ಆಹಾರ ಹುಡುಕಾಟ / Finding Food",
+            "script": "How they find food for survival near rivers and forest trees.",
+            "prompt": "Survivors gathering wild fruits and catching fish by a clear forest stream in daylight, lush green jungle animation, no text",
+            "motion": "zoom_out",
+            "duration": 4.5,
+        },
+        {
+            "chapter": "5. ಕೌಶಲ್ಯ ಕಲಿಕೆ / Learning Skills",
+            "script": "How they learn skills like building shelters, starting fire, and navigating.",
+            "prompt": "Survivors building a bamboo shelter and crafting tools in a forest camp, warm golden hour animation, no text",
+            "motion": "pan_left",
+            "duration": 4.5,
+        },
+    ]
+
+
+# ---------------------------------------------------------------------------
+# TRANSLATION
+# ---------------------------------------------------------------------------
+def translate_to_kannada(text: str) -> str:
+    clean = text.strip()
+    if not clean:
+        return ""
+    if any("\u0c80" <= ch <= "\u0cff" for ch in clean):
+        return clean
+    try:
+        return GoogleTranslator(source="auto", target="kn").translate(clean) or clean
+    except Exception:
+        return clean
+
+
+def translate_to_english(text: str) -> str:
     clean = text.strip()
     if not clean:
         return ""
     try:
-        return GoogleTranslator(source="auto", target=target_lang).translate(clean)
+        return GoogleTranslator(source="auto", target="en").translate(clean) or clean
     except Exception:
         return clean
 
 
 # ---------------------------------------------------------------------------
-# 2. DUAL-SCRIPT FONT ENGINE (Fixes Kannada + English mixed text!)
+# DUAL-SCRIPT FONT RENDERING (Kannada + English together)
 # ---------------------------------------------------------------------------
-def _load_font_from_list(paths: List[str], size: int) -> ImageFont.FreeTypeFont:
+def _load_font(paths: List[str], size: int) -> ImageFont.FreeTypeFont:
     for p in paths:
         if os.path.exists(p):
             try:
@@ -47,15 +140,14 @@ def _load_font_from_list(paths: List[str], size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def get_script_fonts(font_size: int) -> Tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
-    """Returns (latin_font, kannada_font) so mixed text renders both cleanly."""
-    latin_paths = [
+def get_fonts(size: int) -> Tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
+    latin = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         "C:/Windows/Fonts/arialbd.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
     ]
-    kannada_paths = [
+    kannada = [
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansKannada-Bold.otf",
@@ -64,387 +156,267 @@ def get_script_fonts(font_size: int) -> Tuple[ImageFont.FreeTypeFont, ImageFont.
         "C:/Windows/Fonts/Tunga.ttf",
         "/System/Library/Fonts/Supplemental/Kannada MN.ttc",
     ]
-    return _load_font_from_list(latin_paths, font_size), _load_font_from_list(kannada_paths, font_size)
+    return _load_font(latin, size), _load_font(kannada, size)
 
 
-def split_script_runs(text: str) -> List[Tuple[str, bool]]:
-    """Splits text into [(substring, is_kannada), ...]."""
-    runs: List[Tuple[str, bool]] = []
+def _runs(text: str) -> List[Tuple[str, bool]]:
     if not text:
-        return runs
-    curr_chars = []
-    curr_is_kn = "\u0c80" <= text[0] <= "\u0cff"
-    for ch in text:
+        return []
+    out: List[Tuple[str, bool]] = []
+    buf = [text[0]]
+    prev_kn = "\u0c80" <= text[0] <= "\u0cff"
+    for ch in text[1:]:
         is_kn = "\u0c80" <= ch <= "\u0cff"
-        if is_kn == curr_is_kn:
-            curr_chars.append(ch)
+        if is_kn == prev_kn:
+            buf.append(ch)
         else:
-            runs.append(("".join(curr_chars), curr_is_kn))
-            curr_chars = [ch]
-            curr_is_kn = is_kn
-    if curr_chars:
-        runs.append(("".join(curr_chars), curr_is_kn))
-    return runs
+            out.append(("".join(buf), prev_kn))
+            buf = [ch]
+            prev_kn = is_kn
+    out.append(("".join(buf), prev_kn))
+    return out
 
 
-def measure_mixed_text(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    latin_font: ImageFont.FreeTypeFont,
-    kn_font: ImageFont.FreeTypeFont,
-) -> Tuple[int, int]:
-    total_w = 0
-    max_h = 0
-    for segment, is_kn in split_script_runs(text):
-        fnt = kn_font if is_kn else latin_font
-        bb = draw.textbbox((0, 0), segment, font=fnt)
-        total_w += bb[2] - bb[0]
-        max_h = max(max_h, bb[3] - bb[1])
-    return total_w, max_h
+def _measure(draw: ImageDraw.ImageDraw, text: str, lat_f, kn_f) -> Tuple[int, int]:
+    w, h = 0, 0
+    for seg, is_kn in _runs(text):
+        f = kn_f if is_kn else lat_f
+        b = draw.textbbox((0, 0), seg, font=f)
+        w += b[2] - b[0]
+        h = max(h, b[3] - b[1])
+    return w, h
 
 
-def draw_mixed_text(
-    draw: ImageDraw.ImageDraw,
-    xy: Tuple[int, int],
-    text: str,
-    latin_font: ImageFont.FreeTypeFont,
-    kn_font: ImageFont.FreeTypeFont,
-    fill: Tuple[int, int, int, int],
-) -> None:
+def _draw_text(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str, lat_f, kn_f, fill) -> None:
     x, y = xy
-    for segment, is_kn in split_script_runs(text):
-        fnt = kn_font if is_kn else latin_font
-        draw.text((x, y), segment, font=fnt, fill=fill)
-        bb = draw.textbbox((0, 0), segment, font=fnt)
-        x += bb[2] - bb[0]
+    for seg, is_kn in _runs(text):
+        f = kn_f if is_kn else lat_f
+        draw.text((x, y), seg, font=f, fill=fill)
+        b = draw.textbbox((0, 0), seg, font=f)
+        x += b[2] - b[0]
 
 
-def wrap_mixed_text(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    latin_font: ImageFont.FreeTypeFont,
-    kn_font: ImageFont.FreeTypeFont,
-    max_width: int,
-) -> List[str]:
+def _wrap(draw: ImageDraw.ImageDraw, text: str, lat_f, kn_f, max_w: int) -> List[str]:
     words = text.split()
     if not words:
         return []
-    lines: List[str] = []
-    curr = words[0]
+    lines = []
+    cur = words[0]
     for w in words[1:]:
-        test = f"{curr} {w}"
-        tw, _ = measure_mixed_text(draw, test, latin_font, kn_font)
-        if tw <= max_width:
-            curr = test
+        cand = f"{cur} {w}"
+        if _measure(draw, cand, lat_f, kn_f)[0] <= max_w:
+            cur = cand
         else:
-            lines.append(curr)
-            curr = w
-    lines.append(curr)
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
     return lines
 
 
-def render_banner_overlay(
-    width: int,
-    height: int,
-    top_title: str = "",
-    bottom_caption: str = "",
-    accent_color: Tuple[int, int, int] = (255, 196, 54),
-) -> np.ndarray:
-    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-
-    # Top Title Pill
-    if top_title.strip():
-        lat_f, kn_f = get_script_fonts(max(24, int(height * 0.038)))
-        t_lines = wrap_mixed_text(draw, top_title.strip(), lat_f, kn_f, int(width * 0.84))
-        t_heights, t_widths = [], []
-        for line in t_lines:
-            lw, lh = measure_mixed_text(draw, line, lat_f, kn_f)
-            t_widths.append(lw)
-            t_heights.append(lh + 10)
-        box_w = min(width - 48, max(t_widths) + 44)
-        box_h = sum(t_heights) + 22
-        bx = (width - box_w) // 2
-        by = 24
-        draw.rounded_rectangle(
-            [bx, by, bx + box_w, by + box_h],
-            radius=14,
-            fill=(15, 20, 35, 215),
-            outline=(*accent_color, 190),
-            width=2,
-        )
-        cy = by + 11
-        for line, lw, lh in zip(t_lines, t_widths, t_heights):
-            tx = bx + (box_w - lw) // 2
-            draw_mixed_text(draw, (tx, cy), line, lat_f, kn_f, (*accent_color, 255))
-            cy += lh
-
-    # Bottom Subtitle Card
-    if bottom_caption.strip():
-        lat_f, kn_f = get_script_fonts(max(28, int(height * 0.044)))
-        c_lines = wrap_mixed_text(draw, bottom_caption.strip(), lat_f, kn_f, int(width * 0.86))
-        c_heights, c_widths = [], []
-        for line in c_lines:
-            lw, lh = measure_mixed_text(draw, line, lat_f, kn_f)
-            c_widths.append(lw)
-            c_heights.append(lh + 12)
-        box_w = min(width - 40, max(c_widths) + 52)
-        box_h = sum(c_heights) + 30
-        bx = (width - box_w) // 2
-        by = height - box_h - 32
-
-        draw.rounded_rectangle(
-            [bx, by, bx + box_w, by + box_h],
-            radius=18,
-            fill=(10, 12, 20, 225),
-            outline=(255, 255, 255, 60),
-            width=2,
-        )
-        draw.rounded_rectangle(
-            [bx + 10, by + 12, bx + 17, by + box_h - 12],
-            radius=4,
-            fill=(*accent_color, 255),
-        )
-        cy = by + 15
-        for line, lw, lh in zip(c_lines, c_widths, c_heights):
-            tx = bx + (box_w - lw) // 2 + 4
-            draw_mixed_text(draw, (tx + 2, cy + 2), line, lat_f, kn_f, (0, 0, 0, 230))
-            draw_mixed_text(draw, (tx, cy), line, lat_f, kn_f, (255, 255, 255, 255))
-            cy += lh
-
-    return np.array(overlay)
-
-
 # ---------------------------------------------------------------------------
-# 3. FREE SCENE IMAGE GENERATION
+# SINGLE API: HUGGING FACE INFERENCE CLIENT (+ LOCAL FALLBACK)
 # ---------------------------------------------------------------------------
-def generate_procedural_art(prompt: str, width: int, height: int, out_path: str) -> str:
+def _fallback_scene_image(prompt: str, width: int, height: int, out_path: str) -> str:
     seed = int(hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8], 16)
     rng = random.Random(seed)
-    palettes = [
-        [(18, 24, 58), (88, 42, 130), (235, 110, 95)],
-        [(12, 48, 56), (24, 115, 118), (240, 185, 85)],
-        [(35, 18, 48), (140, 38, 82), (250, 155, 70)],
-        [(15, 32, 65), (38, 92, 168), (110, 210, 235)],
-    ]
-    c1, c2, c3 = rng.choice(palettes)
-    y_grid = np.linspace(0, 1, height, dtype=np.float32)[:, None]
-    x_grid = np.linspace(0, 1, width, dtype=np.float32)[None, :]
-    blend = 0.65 * y_grid + 0.35 * x_grid
+    top_c = rng.choice([(20, 26, 56), (34, 20, 52), (16, 42, 54)])
+    bot_c = rng.choice([(225, 132, 56), (95, 155, 135), (235, 168, 76)])
 
-    img_arr = np.zeros((height, width, 3), dtype=np.float32)
-    for ch in range(3):
-        top_mid = c1[ch] * (1 - blend * 2) + c2[ch] * (blend * 2)
-        mid_bot = c2[ch] * (1 - (blend - 0.5) * 2) + c3[ch] * ((blend - 0.5) * 2)
-        img_arr[:, :, ch] = np.where(blend < 0.5, top_mid, mid_bot)
+    y = np.linspace(0, 1, height, dtype=np.float32)[:, None]
+    arr = np.zeros((height, width, 3), dtype=np.float32)
+    for c in range(3):
+        arr[:, :, c] = top_c[c] * (1 - y) + bot_c[c] * y
 
-    base = Image.fromarray(np.clip(img_arr, 0, 255).astype(np.uint8)).convert("RGBA")
-    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    for _ in range(18):
-        rx = rng.randint(-50, width + 50)
-        ry = rng.randint(-50, height + 50)
-        rad = rng.randint(int(min(width, height) * 0.06), int(min(width, height) * 0.24))
-        draw.ellipse([rx - rad, ry - rad, rx + rad, ry + rad], fill=(255, 255, 255, rng.randint(18, 55)))
-    overlay = overlay.filter(ImageFilter.GaussianBlur(radius=18))
-    Image.alpha_composite(base, overlay).convert("RGB").save(out_path, quality=92)
+    img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).convert("RGBA")
+    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    gdraw = ImageDraw.Draw(glow)
+    gx, gy = width // 2, int(height * 0.38)
+    gr = int(min(width, height) * 0.14)
+    gdraw.ellipse([gx - gr, gy - gr, gx + gr, gy + gr], fill=(255, 222, 130, 140))
+    for _ in range(12):
+        rx = rng.randint(0, width)
+        ry = rng.randint(0, int(height * 0.75))
+        rr = rng.randint(20, 85)
+        gdraw.ellipse([rx - rr, ry - rr, rx + rr, ry + rr], fill=(255, 210, 120, 45))
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=18))
+    img = Image.alpha_composite(img, glow)
+
+    fg = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    fdraw = ImageDraw.Draw(fg)
+    base_y = int(height * 0.70)
+    fdraw.polygon([(0, height), (0, base_y), (width // 2, base_y - int(height * 0.10)), (width, base_y), (width, height)], fill=(15, 22, 20, 225))
+    Image.alpha_composite(img, fg).convert("RGB").save(out_path, quality=92)
     return out_path
 
 
-def try_pollinations(prompt: str, width: int, height: int, out_path: str, seed: int) -> bool:
-    encoded = urllib.parse.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&seed={seed}&nologo=true"
+def generate_hf_scene_image(
+    prompt: str,
+    hf_token: str,
+    model_id: str,
+    width: int,
+    height: int,
+    out_path: str,
+) -> Tuple[str, Optional[str]]:
+    """Generates an image via Hugging Face InferenceClient; returns (path, error_or_none)."""
+    eng_prompt = translate_to_english(prompt)
+    token = hf_token.strip()
+    if not token:
+        return _fallback_scene_image(eng_prompt, width, height, out_path), "No HF_TOKEN provided; used local fallback art."
+
     try:
-        resp = requests.get(url, timeout=25)
-        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-            with open(out_path, "wb") as f:
-                f.write(resp.content)
-            return True
-    except Exception:
-        pass
-    return False
-
-
-def get_free_ai_scene_image(scene_prompt: str, style_desc: str, width: int, height: int, out_path: str, seed: int) -> str:
-    # Always translate image prompt to English so image models understand Kannada scripts too
-    eng_prompt = translate_text(scene_prompt, target_lang="en")
-    eng_style = translate_text(style_desc, target_lang="en")
-    full_prompt = f"{eng_prompt}, {eng_style}, cinematic lighting, high detail, digital illustration, no text"
-    if try_pollinations(full_prompt, width, height, out_path, seed):
-        return out_path
-    return generate_procedural_art(full_prompt, width, height, out_path)
+        client = InferenceClient(token=token)
+        pil_img = client.text_to_image(prompt=eng_prompt, model=model_id)
+        pil_img = pil_img.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+        pil_img.save(out_path, quality=92)
+        return out_path, None
+    except Exception as e:
+        fallback_p = _fallback_scene_image(eng_prompt, width, height, out_path)
+        return fallback_p, f"HF image fallback used ({model_id}): {e}"
 
 
 # ---------------------------------------------------------------------------
-# 4. FREE NEURAL VOICEOVER (Auto-aligns language with voice!)
+# VOICEOVER (edge-tts) & VIDEO RENDERER
 # ---------------------------------------------------------------------------
-async def _synth_edge_tts(text: str, voice: str, out_path: str) -> None:
-    communicate = edge_tts.Communicate(text=text, voice=voice)
-    await communicate.save(out_path)
+async def _synth_tts(text: str, voice: str, out_mp3: str) -> None:
+    await edge_tts.Communicate(text=text, voice=voice).save(out_mp3)
 
 
-def synthesize_line_audio(text: str, voice: str, out_path: str) -> Optional[float]:
+def make_voiceover(text: str, voice: str, out_mp3: str) -> Tuple[Optional[str], float]:
     clean = text.strip()
     if not clean:
-        return None
-
-    # If user picked a Kannada voice (kn-IN-*) but text is in English, translate to Kannada so voiceover works properly
-    spoken_text = clean
-    if voice.startswith("kn-IN") and not any("\u0c80" <= ch <= "\u0cff" for ch in clean):
-        spoken_text = translate_text(clean, target_lang="kn")
-    elif voice.startswith("hi-IN") and not any("\u0900" <= ch <= "\u097f" for ch in clean):
-        spoken_text = translate_text(clean, target_lang="hi")
-
+        return None, 0.0
+    spoken = translate_to_kannada(clean) if voice.startswith("kn-IN") else clean
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(_synth_edge_tts(spoken_text, voice, out_path))
+        loop.run_until_complete(_synth_tts(spoken, voice, out_mp3))
     except Exception:
-        return None
+        return None, 0.0
     finally:
         loop.close()
 
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-        clip = AudioFileClip(out_path)
-        dur = clip.duration
+    if os.path.exists(out_mp3) and os.path.getsize(out_mp3) > 0:
+        clip = AudioFileClip(out_mp3)
+        dur = float(clip.duration)
         clip.close()
-        return dur
-    return None
+        return out_mp3, dur
+    return None, 0.0
 
 
-# ---------------------------------------------------------------------------
-# 5. MOTION & RENDER FROM EDITABLE SCENE LIST
-# ---------------------------------------------------------------------------
-def prepare_canvas(img_path: str, width: int, height: int) -> np.ndarray:
-    src = Image.open(img_path).convert("RGB")
-    bg = src.resize((width, height), Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(radius=14))
-    bg_arr = (np.asarray(bg, dtype=np.float32) * 0.45).astype(np.uint8)
+def _build_overlay(width: int, height: int, chapter: str, subtitle: str) -> np.ndarray:
+    layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
 
-    src_ratio = src.width / src.height
-    dst_ratio = width / height
-    if src_ratio > dst_ratio:
-        new_w = width
-        new_h = int(width / src_ratio)
-    else:
-        new_h = height
-        new_w = int(height * src_ratio)
+    if chapter.strip():
+        c_lat, c_kn = get_fonts(max(20, int(height * 0.032)))
+        lw, lh = _measure(draw, chapter.strip(), c_lat, c_kn)
+        draw.rounded_rectangle([24, 24, 24 + lw + 32, 24 + lh + 16], radius=10, fill=(16, 18, 30, 210), outline=(255, 195, 65, 190), width=2)
+        _draw_text(draw, (40, 31), chapter.strip(), c_lat, c_kn, (255, 210, 80, 255))
 
-    fg = src.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    canvas = Image.fromarray(bg_arr)
-    canvas.paste(fg, ((width - new_w) // 2, (height - new_h) // 2))
-    return np.array(canvas)
+    if subtitle.strip():
+        s_lat, s_kn = get_fonts(max(28, int(height * 0.045)))
+        lines = _wrap(draw, subtitle.strip(), s_lat, s_kn, int(width * 0.85))
+        ws, hs = [], []
+        for ln in lines:
+            lw, lh = _measure(draw, ln, s_lat, s_kn)
+            ws.append(lw)
+            hs.append(lh + 12)
+        bw = min(width - 36, max(ws) + 48)
+        bh = sum(hs) + 26
+        bx = (width - bw) // 2
+        by = height - bh - 30
+        draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=16, fill=(10, 12, 20, 228), outline=(255, 200, 70, 150), width=2)
+        cy = by + 13
+        for ln, lw, lh in zip(lines, ws, hs):
+            tx = bx + (bw - lw) // 2
+            _draw_text(draw, (tx + 2, cy + 2), ln, s_lat, s_kn, (0, 0, 0, 235))
+            _draw_text(draw, (tx, cy), ln, s_lat, s_kn, (255, 255, 255, 255))
+            cy += lh
 
-
-def build_animated_scene(
-    img_path: str,
-    duration: float,
-    top_title: str,
-    caption: str,
-    width: int,
-    height: int,
-    motion: str,
-    audio_path: Optional[str] = None,
-) -> CompositeVideoClip:
-    base_frame = prepare_canvas(img_path, width, height)
-
-    def make_frame(t: float) -> np.ndarray:
-        p = np.clip(t / max(duration, 0.01), 0.0, 1.0)
-        ease = p * p * (3.0 - 2.0 * p)
-
-        if motion == "zoom_in":
-            scale, cx, cy = 1.0 + 0.14 * ease, 0.5, 0.5
-        elif motion == "zoom_out":
-            scale, cx, cy = 1.14 - 0.14 * ease, 0.5, 0.5
-        elif motion == "pan_right":
-            scale, cx, cy = 1.12, 0.43 + 0.14 * ease, 0.5
-        elif motion == "pan_left":
-            scale, cx, cy = 1.12, 0.57 - 0.14 * ease, 0.5
-        else:
-            scale, cx, cy = 1.03 + 0.11 * ease, 0.46 + 0.08 * ease, 0.47 + 0.06 * ease
-
-        crop_w = int(round(width / scale))
-        crop_h = int(round(height / scale))
-        x1 = max(0, min(width - crop_w, int(round(cx * width - crop_w / 2))))
-        y1 = max(0, min(height - crop_h, int(round(cy * height - crop_h / 2))))
-
-        cropped = base_frame[y1 : y1 + crop_h, x1 : x1 + crop_w]
-        resized = Image.fromarray(cropped).resize((width, height), Image.Resampling.BILINEAR)
-        return np.array(resized)
-
-    bg_clip = ImageClip(base_frame).set_duration(duration).fl(lambda gf, t: make_frame(t), apply_to=[]).set_fps(24)
-
-    layers = [bg_clip]
-    if top_title.strip() or caption.strip():
-        overlay_arr = render_banner_overlay(width, height, top_title=top_title, bottom_caption=caption)
-        txt_clip = ImageClip(overlay_arr, ismask=False).set_duration(duration).crossfadein(min(0.35, duration * 0.25))
-        layers.append(txt_clip)
-
-    comp = CompositeVideoClip(layers, size=(width, height)).set_duration(duration)
-    if audio_path and os.path.exists(audio_path):
-        comp = comp.set_audio(AudioFileClip(audio_path))
-    return comp
+    return np.array(layer)
 
 
-def split_script_scenes(script: str, max_scenes: int = 10) -> List[str]:
-    lines = [s.strip() for s in re.split(r"(?<=[.!?।])\s+|\n+", script.strip()) if s.strip()]
-    return lines[:max_scenes]
-
-
-def render_from_scenes(
+def render_video_from_scenes(
     scenes: List[Dict],
     workdir: str,
-    output_path: str,
-    resolution: Tuple[int, int] = (1280, 720),
-    enable_voiceover: bool = True,
-    voice_name: str = "kn-IN-SapnaNeural",
-    progress_callback=None,
-) -> str:
-    """Renders final MP4 directly from the user-edited storyboard scenes."""
-    width, height = resolution
+    out_mp4: str,
+    width: int = 1280,
+    height: int = 720,
+    enable_audio: bool = True,
+    voice: str = "kn-IN-SapnaNeural",
+    progress_cb=None,
+) -> Tuple[str, List[str]]:
+    warnings: List[str] = []
     clips: List[CompositeVideoClip] = []
     total = len(scenes)
 
-    for idx, sc in enumerate(scenes):
-        if progress_callback:
-            progress_callback(idx / max(total, 1), f"Rendering scene {idx + 1}/{total}...")
+    for i, sc in enumerate(scenes):
+        if progress_cb:
+            progress_cb(i / max(total, 1), f"Rendering scene {i + 1}/{total}...")
 
-        audio_file = None
-        dur = float(sc.get("duration", 4.0))
-        narration_text = sc.get("narration", sc.get("caption", ""))
+        audio_path = None
+        audio_dur = 0.0
+        narration = sc.get("subtitle_kn") or sc.get("script", "")
+        if enable_audio and narration.strip():
+            mp3_p = os.path.join(workdir, f"vo_{i}_{int(time.time()*1000)}.mp3")
+            audio_path, audio_dur = make_voiceover(narration, voice=voice, out_mp3=mp3_p)
+            if not audio_path:
+                warnings.append(f"Scene {i + 1}: Voiceover unavailable; used scene duration.")
 
-        if enable_voiceover and narration_text.strip():
-            candidate_mp3 = os.path.join(workdir, f"voice_{idx}_{int(time.time())}.mp3")
-            spoken_dur = synthesize_line_audio(narration_text, voice=voice_name, out_path=candidate_mp3)
-            if spoken_dur:
-                audio_file = candidate_mp3
-                dur = max(dur, spoken_dur + 0.5)
+        dur = max(float(sc.get("duration", 4.5)), audio_dur + 0.5) if audio_dur > 0 else float(sc.get("duration", 4.5))
+        motion = sc.get("motion", "zoom_in")
 
-        clip = build_animated_scene(
-            img_path=sc["image_path"],
-            duration=dur,
-            top_title=sc.get("top_title", ""),
-            caption=sc.get("caption", ""),
-            width=width,
-            height=height,
-            motion=sc.get("motion", "zoom_in"),
-            audio_path=audio_file,
-        )
-        if idx > 0:
-            clip = clip.crossfadein(0.45)
-        clips.append(clip)
+        base = np.array(Image.open(sc["image_path"]).convert("RGB").resize((width, height), Image.Resampling.LANCZOS))
 
-    if progress_callback:
-        progress_callback(0.92, "Encoding final MP4...")
+        def frame_fn(t: float, arr=base, d=dur, m=motion) -> np.ndarray:
+            p = np.clip(t / max(d, 0.01), 0.0, 1.0)
+            ease = p * p * (3.0 - 2.0 * p)
+            if m == "zoom_in":
+                scale, cx, cy = 1.0 + 0.15 * ease, 0.5, 0.5
+            elif m == "zoom_out":
+                scale, cx, cy = 1.15 - 0.15 * ease, 0.5, 0.5
+            elif m == "pan_right":
+                scale, cx, cy = 1.14, 0.43 + 0.14 * ease, 0.5
+            elif m == "pan_left":
+                scale, cx, cy = 1.14, 0.57 - 0.14 * ease, 0.5
+            else:
+                scale, cx, cy = 1.04 + 0.11 * ease, 0.46 + 0.08 * ease, 0.46 + 0.08 * ease
 
-    final_video = concatenate_videoclips(clips, method="compose", padding=-0.45 if len(clips) > 1 else 0)
-    final_video.write_videofile(
-        output_path,
+            cw = int(round(width / scale))
+            ch = int(round(height / scale))
+            x1 = max(0, min(width - cw, int(round(cx * width - cw / 2))))
+            y1 = max(0, min(height - ch, int(round(cy * height - ch / 2))))
+            crop = arr[y1 : y1 + ch, x1 : x1 + cw]
+            return np.array(Image.fromarray(crop).resize((width, height), Image.Resampling.BILINEAR))
+
+        bg_clip = ImageClip(base).set_duration(dur).fl(lambda gf, t, fn=frame_fn: fn(t), apply_to=[]).set_fps(24)
+        ov_arr = _build_overlay(width, height, sc.get("chapter", ""), sc.get("subtitle_kn", ""))
+        ov_clip = ImageClip(ov_arr, ismask=False).set_duration(dur).crossfadein(min(0.3, dur * 0.2))
+
+        comp = CompositeVideoClip([bg_clip, ov_clip], size=(width, height)).set_duration(dur)
+        if audio_path and os.path.exists(audio_path):
+            comp = comp.set_audio(AudioFileClip(audio_path))
+        if i > 0:
+            comp = comp.crossfadein(0.45)
+        clips.append(comp)
+
+    if progress_cb:
+        progress_cb(0.92, "Encoding final MP4...")
+
+    final = concatenate_videoclips(clips, method="compose", padding=-0.45 if len(clips) > 1 else 0)
+    final.write_videofile(
+        out_mp4,
         fps=24,
         codec="libx264",
         audio_codec="aac",
+        audio=enable_audio,
         preset="medium",
         threads=4,
         logger=None,
     )
-    if progress_callback:
-        progress_callback(1.0, "Complete!")
-    return output_path
+    if progress_cb:
+        progress_cb(1.0, "Done!")
+    return out_mp4, warnings
+
+
+def split_custom_lines(text: str) -> List[str]:
+    return [line.strip() for line in re.split(r"(?<=[.!?।])\s+|\n+", text.strip()) if line.strip()]
