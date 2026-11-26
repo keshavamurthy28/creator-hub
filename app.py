@@ -48,7 +48,7 @@ st.markdown(
         padding: 14px;
         box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
       }
-      .kn-box {
+      .script-box {
         background: #121722;
         border: 1px solid #2b3850;
         border-radius: 10px;
@@ -61,11 +61,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+VOICE_CATALOG = {
+    "Kannada (ಕನ್ನಡ)": {
+        "Sapna (Female, India)": "kn-IN-SapnaNeural",
+        "Gagan (Male, India)": "kn-IN-GaganNeural",
+    },
+    "English": {
+        "Neerja (Female, India)": "en-IN-NeerjaNeural",
+        "Prabhat (Male, India)": "en-IN-PrabhatNeural",
+        "Aria (Female, US)": "en-US-AriaNeural",
+        "Guy (Male, US)": "en-US-GuyNeural",
+    },
+}
+
 # --- SESSION STATE ---
 defaults = {
     "script_en": "",
     "script_kn": "",
-    "subtitles_kn_srt": "",
+    "voice_lang": "Kannada (ಕನ್ನಡ)",
+    "subtitles_srt": "",
     "pulled_video_path": None,
     "scenes": [],
     "scene_labels": [],
@@ -84,7 +98,7 @@ defaults = {
     "transition": "Crossfade",
     "easing": "Ease-In-Out",
     "sticker_text": "🔥✨💡",
-    "subtitle_kn_line": "ಕನ್ನಡ ಕಂಟೆಂಟ್ ಸ್ಟುಡಿಯೋ",
+    "subtitle_line": "ಕನ್ನಡ ಕಂಟೆಂಟ್ ಸ್ಟುಡಿಯೋ",
     "collage_mode": "Single View",
     "bg_remove": False,
 }
@@ -130,11 +144,11 @@ def translate_text_free(text: str, source_lang: str, target_lang: str) -> str:
     return f"English translation ({clean[:60]}): Practical story and step-by-step guidance."
 
 
-def load_kannada_font(size: int = 32):
+def load_subtitle_font(size: int = 32):
     candidates = [
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansKannada-Regular.otf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -145,11 +159,11 @@ def load_kannada_font(size: int = 32):
     return ImageFont.load_default()
 
 
-async def generate_kannada_tts_and_kn_srt(kn_text: str, voice: str, rate: str, pitch: str):
+async def generate_tts_and_srt(text: str, voice: str, rate: str, pitch: str):
     audio_buf = io.BytesIO()
     srt_lines = []
     idx = 1
-    communicate = edge_tts.Communicate(text=kn_text, voice=voice, rate=rate, pitch=pitch)
+    communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
 
     def fmt_srt(sec: float) -> str:
         total_ms = max(0, int(round(sec * 1000)))
@@ -165,12 +179,12 @@ async def generate_kannada_tts_and_kn_srt(kn_text: str, voice: str, rate: str, p
         elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
             start_s = chunk["offset"] / 10_000_000
             dur_s = max(chunk["duration"] / 10_000_000, 0.4)
-            word_kn = chunk.get("text", "").strip()
-            if word_kn:
-                srt_lines.append(f"{idx}\n{fmt_srt(start_s)} --> {fmt_srt(start_s + dur_s)}\n{word_kn}\n")
+            token = chunk.get("text", "").strip()
+            if token:
+                srt_lines.append(f"{idx}\n{fmt_srt(start_s)} --> {fmt_srt(start_s + dur_s)}\n{token}\n")
                 idx += 1
 
-    srt_str = "\n".join(srt_lines) if srt_lines else f"1\n00:00:00,000 --> 00:00:05,000\n{kn_text}\n"
+    srt_str = "\n".join(srt_lines) if srt_lines else f"1\n00:00:00,000 --> 00:00:05,000\n{text}\n"
     return audio_buf.getvalue(), srt_str
 
 
@@ -226,17 +240,17 @@ def apply_inshot_frame_edits(img: Image.Image) -> Image.Image:
         out = Image.blend(dark_bg, out, st.session_state.opacity)
 
     draw = ImageDraw.Draw(out)
-    font_kn = load_kannada_font(30)
+    font_sub = load_subtitle_font(30)
     w, h = out.size
-    kn_sub = st.session_state.subtitle_kn_line.strip()
-    if kn_sub:
-        box_w = min(w - 80, max(360, len(kn_sub) * 20 + 60))
+    sub_txt = st.session_state.subtitle_line.strip()
+    if sub_txt:
+        box_w = min(w - 80, max(360, len(sub_txt) * 20 + 60))
         bx0 = (w - box_w) // 2
         by0 = h - 125
         draw.rounded_rectangle([bx0, by0, bx0 + box_w, by0 + 68], radius=10, fill=(14, 15, 20))
-        draw.text((bx0 + 24, by0 + 16), kn_sub, fill=(255, 255, 255), font=font_kn)
+        draw.text((bx0 + 24, by0 + 16), sub_txt, fill=(255, 255, 255), font=font_sub)
     if st.session_state.sticker_text.strip():
-        draw.text((max(20, w - 200), 28), st.session_state.sticker_text.strip(), fill=(255, 255, 255), font=font_kn)
+        draw.text((max(20, w - 200), 28), st.session_state.sticker_text.strip(), fill=(255, 255, 255), font=font_sub)
     return out
 
 
@@ -353,18 +367,23 @@ with screen_col:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with side_col:
-    st.markdown("#### Kannada Voice & Subtitles")
+    st.markdown("#### Voiceover & Script")
     if st.session_state.generated_audio:
         st.audio(st.session_state.generated_audio, format="audio/mp3")
-    if st.session_state.script_kn:
-        st.markdown(f'<div class="kn-box">{st.session_state.script_kn}</div>', unsafe_allow_html=True)
+    active_preview = (
+        st.session_state.script_kn
+        if st.session_state.voice_lang.startswith("Kannada")
+        else st.session_state.script_en
+    )
+    if active_preview:
+        st.markdown(f'<div class="script-box">{active_preview}</div>', unsafe_allow_html=True)
     else:
-        st.caption("No Kannada narration generated yet.")
+        st.caption("No narration script generated yet.")
 
 st.divider()
 
 # ==============================================================================
-# EDITING DOCK (ENGLISH CONTROLS, KANNADA SUBTITLES)
+# EDITING DOCK (ENGLISH INTERFACE)
 # ==============================================================================
 st.markdown("### Editing Controls")
 b1, b2, b3, b4, b5 = st.columns(5)
@@ -374,8 +393,8 @@ if b2.button("⚡ Speed & Motion"):
     st.session_state.tool_group = "Speed & Motion"
 if b3.button("🎨 Filters & Rotate"):
     st.session_state.tool_group = "Filters & Look"
-if b4.button("💬 Kannada Subtitles"):
-    st.session_state.tool_group = "Kannada Subtitles"
+if b4.button("💬 Subtitle Overlay"):
+    st.session_state.tool_group = "Subtitle Overlay"
 if b5.button("🧩 Collage & Layout"):
     st.session_state.tool_group = "Collage & Layout"
 
@@ -396,9 +415,9 @@ elif group == "Filters & Look":
     st.session_state.rotation = c2.selectbox("Rotate (°)", [0, 90, 180, 270])
     st.session_state.opacity = c3.slider("Opacity", 0.1, 1.0, float(st.session_state.opacity), 0.05)
     st.session_state.flip_h = c4.checkbox("Mirror Flip", value=st.session_state.flip_h)
-elif group == "Kannada Subtitles":
+elif group == "Subtitle Overlay":
     c1, c2 = st.columns([3, 1])
-    st.session_state.subtitle_kn_line = c1.text_input("Kannada Subtitle Text on Screen", value=st.session_state.subtitle_kn_line)
+    st.session_state.subtitle_line = c1.text_input("On-Screen Subtitle Line", value=st.session_state.subtitle_line)
     st.session_state.sticker_text = c2.text_input("Stickers", value=st.session_state.sticker_text)
 else:
     c1, c2 = st.columns(2)
@@ -408,11 +427,11 @@ else:
 st.divider()
 
 # ==============================================================================
-# WORKFLOW TABS (100% ENGLISH UI)
+# WORKFLOW TABS (100% ENGLISH INTERFACE)
 # ==============================================================================
 t1, t2, t3, t4 = st.tabs([
     "📁 Media & Link Pull",
-    "📜 Script & Kannada Voice",
+    "📜 Script & Voice (Kannada / English)",
     "🖼️ Uploaded Scenes",
     "📥 Render & Export",
 ])
@@ -456,7 +475,7 @@ with t1:
         st.rerun()
 
 with t2:
-    st.subheader("Two-Way Script Sync (English ↔ Kannada) & Kannada Voiceover")
+    st.subheader("Two-Way Script Sync (English ↔ Kannada) & Kannada / English Voiceover")
     topic_in = st.text_input("Reel / Story Topic", "3 smart second-income habits in 30 seconds")
     if st.button("📝 Generate Starter Script"):
         st.session_state.script_en = (
@@ -464,49 +483,62 @@ with t2:
             f"pick one practical skill, stay consistent every day, and grow step by step."
         )
         st.session_state.script_kn = translate_text_free(st.session_state.script_en, "en", "kn")
-        if st.session_state.script_kn:
-            st.session_state.subtitle_kn_line = st.session_state.script_kn[:80]
         st.rerun()
 
-    en_val = st.text_area("English Script", value=st.session_state.script_en, height=120)
+    en_val = st.text_area("English Script", value=st.session_state.script_en, height=115)
     sync_col1, sync_col2 = st.columns(2)
     if sync_col1.button("⬇️ Translate English to Kannada"):
         st.session_state.script_en = en_val
         st.session_state.script_kn = translate_text_free(en_val, "en", "kn")
-        if st.session_state.script_kn:
-            st.session_state.subtitle_kn_line = st.session_state.script_kn[:80]
+        if st.session_state.voice_lang.startswith("Kannada") and st.session_state.script_kn:
+            st.session_state.subtitle_line = st.session_state.script_kn[:80]
         st.rerun()
 
-    kn_val = st.text_area("Kannada Script (Narration & Subtitles)", value=st.session_state.script_kn, height=120)
+    kn_val = st.text_area("Kannada Script", value=st.session_state.script_kn, height=115)
     if sync_col2.button("⬆️ Translate Kannada to English"):
         st.session_state.script_kn = kn_val
         st.session_state.script_en = translate_text_free(kn_val, "kn", "en")
+        if not st.session_state.voice_lang.startswith("Kannada") and st.session_state.script_en:
+            st.session_state.subtitle_line = st.session_state.script_en[:80]
         st.rerun()
 
     st.session_state.script_en = en_val
     st.session_state.script_kn = kn_val
 
-    v1, v2 = st.columns(2)
-    kn_voice = v1.selectbox("Kannada Voice", ["kn-IN-SapnaNeural", "kn-IN-GaganNeural"])
-    kn_rate = v2.slider("Voice Speed (%)", -40, 40, 0)
+    v1, v2, v3 = st.columns(3)
+    selected_lang = v1.selectbox(
+        "Voice Language",
+        ["Kannada (ಕನ್ನಡ)", "English"],
+        index=0 if st.session_state.voice_lang.startswith("Kannada") else 1,
+    )
+    st.session_state.voice_lang = selected_lang
+    voice_options = VOICE_CATALOG[selected_lang]
+    chosen_voice_label = v2.selectbox("Voice Speaker", list(voice_options.keys()))
+    voice_rate = v3.slider("Voice Speed (%)", -40, 40, 0)
 
-    if st.button("🎙️ Generate Kannada Voice & Kannada Subtitles", type="primary"):
+    if st.button("🎙️ Generate Voice & Subtitles", type="primary"):
         if not HAS_EDGE_TTS:
             st.error("Add `edge-tts` to `requirements.txt`.")
         else:
-            with st.spinner("Generating Kannada voiceover and Kannada subtitles..."):
-                audio_bytes, srt_kn = run_async(
-                    generate_kannada_tts_and_kn_srt(
-                        st.session_state.script_kn or "ನಮಸ್ಕಾರ!",
-                        kn_voice,
-                        f"{kn_rate:+d}%",
+            narration_text = (
+                st.session_state.script_kn.strip()
+                if selected_lang.startswith("Kannada")
+                else st.session_state.script_en.strip()
+            )
+            if not narration_text:
+                narration_text = "ನಮಸ್ಕಾರ! ಕ್ರಿಯೇಟರ್ ಹಬ್ ಸ್ಟುಡಿಯೋಗೆ ಸ್ವಾಗತ." if selected_lang.startswith("Kannada") else "Welcome to Creator Hub Studio!"
+            with st.spinner("Generating voiceover and subtitles..."):
+                audio_bytes, srt_data = run_async(
+                    generate_tts_and_srt(
+                        narration_text,
+                        voice_options[chosen_voice_label],
+                        f"{voice_rate:+d}%",
                         "+0Hz",
                     )
                 )
                 st.session_state.generated_audio = audio_bytes
-                st.session_state.subtitles_kn_srt = srt_kn
-                if st.session_state.script_kn:
-                    st.session_state.subtitle_kn_line = st.session_state.script_kn[:80]
+                st.session_state.subtitles_srt = srt_data
+                st.session_state.subtitle_line = narration_text[:80]
                 st.rerun()
 
 with t3:
@@ -532,30 +564,35 @@ with t4:
             else:
                 st.info("Upload at least one image scene and ensure `imageio` and `imageio-ffmpeg` are in `requirements.txt`.")
 
+    active_script_txt = (
+        st.session_state.script_kn
+        if st.session_state.voice_lang.startswith("Kannada")
+        else st.session_state.script_en
+    )
     d1, d2, d3, d4 = st.columns(4)
-    if st.session_state.script_kn:
+    if active_script_txt:
         d1.download_button(
-            "⬇️ Kannada Script (.txt)",
-            data=st.session_state.script_kn.encode("utf-8"),
-            file_name="kannada_script.txt",
+            "⬇️ Script (.txt)",
+            data=active_script_txt.encode("utf-8"),
+            file_name="kannada_script.txt" if st.session_state.voice_lang.startswith("Kannada") else "english_script.txt",
         )
-    if st.session_state.subtitles_kn_srt:
+    if st.session_state.subtitles_srt:
         d2.download_button(
-            "⬇️ Kannada Subtitles (.srt)",
-            data=st.session_state.subtitles_kn_srt.encode("utf-8"),
-            file_name="kannada_subtitles.srt",
+            "⬇️ Subtitles (.srt)",
+            data=st.session_state.subtitles_srt.encode("utf-8"),
+            file_name="kannada_subtitles.srt" if st.session_state.voice_lang.startswith("Kannada") else "english_subtitles.srt",
         )
     if st.session_state.generated_audio:
         d3.download_button(
-            "⬇️ Kannada Voice (.mp3)",
+            "⬇️ Voiceover (.mp3)",
             data=st.session_state.generated_audio,
-            file_name="kannada_voiceover.mp3",
+            file_name="kannada_voiceover.mp3" if st.session_state.voice_lang.startswith("Kannada") else "english_voiceover.mp3",
             mime="audio/mpeg",
         )
     if st.session_state.final_video_bytes:
         d4.download_button(
             "⬇️ Rendered Video (.mp4)",
             data=st.session_state.final_video_bytes,
-            file_name="creator_hub_kannada.mp4",
+            file_name="creator_hub_video.mp4",
             mime="video/mp4",
         )
