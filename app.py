@@ -57,12 +57,12 @@ st.markdown(
         color: #ffe082;
         font-size: 15px;
       }
-      .scene-card {
+      .scene-row {
         background: #121722;
-        border: 1px solid #253046;
+        border: 1px solid #232d42;
         border-radius: 10px;
         padding: 10px;
-        margin-bottom: 10px;
+        margin-bottom: 8px;
       }
     </style>
     """,
@@ -70,7 +70,7 @@ st.markdown(
 )
 
 VOICE_CATALOG = {
-    "Kannada (ಕನ್ನಡ)": {
+    "Kannada": {
         "Sapna (Female, India)": "kn-IN-SapnaNeural",
         "Gagan (Male, India)": "kn-IN-GaganNeural",
     },
@@ -84,19 +84,23 @@ VOICE_CATALOG = {
 
 # --- SESSION STATE ---
 defaults = {
+    "draft_input": "",
+    "scene_items": [],
+    "finalized_story": "",
     "script_en": "",
     "script_kn": "",
-    "voice_lang": "Kannada (ಕನ್ನಡ)",
+    "voice_lang": "Kannada",
     "subtitles_srt": "",
     "pulled_video_path": None,
-    "story_beats": [],
     "scenes": [],
     "scene_labels": [],
-    "target_scene_count": 6,
     "generated_audio": None,
     "final_video_bytes": None,
     "jump_sec": 0.0,
-    "tool_group": "Trim & Cut",
+    "anim_preset": "Ken Burns Zoom-In",
+    "anim_frames": 10,
+    "anim_fps": 12,
+    "edit_mode": "Motion & Speed",
     "speed": 1.0,
     "trim_start": 0.0,
     "trim_end": 30.0,
@@ -107,8 +111,8 @@ defaults = {
     "filter_name": "Original",
     "transition": "Crossfade",
     "easing": "Ease-In-Out",
-    "sticker_text": "🔥✨💡",
-    "subtitle_line": "ಕನ್ನಡ ಕಂಟೆಂಟ್ ಸ್ಟುಡಿಯೋ",
+    "sticker_text": "✨🎬",
+    "subtitle_line": "",
     "collage_mode": "Single View",
     "bg_remove": False,
 }
@@ -148,19 +152,21 @@ def translate_text_free(text: str, source_lang: str, target_lang: str) -> str:
                 return translated.strip()
     except Exception:
         pass
-
-    if target_lang == "kn":
-        return f"ಕನ್ನಡ ಅನುವಾದ ({clean[:60]}): ಕಥೆಯ ಮುಂದಿನ ದೃಶ್ಯ."
-    return f"English translation ({clean[:60]}): Next scene of the story."
+    return clean
 
 
-def load_subtitle_font(size: int = 32):
-    candidates = [
+def load_font(size: int = 30, prefer_kannada: bool = False):
+    kn_paths = [
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansKannada-Regular.otf",
     ]
-    for path in candidates:
+    latin_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    ordered = (kn_paths + latin_paths) if prefer_kannada else (latin_paths + kn_paths)
+    for path in ordered:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size=size)
@@ -169,78 +175,112 @@ def load_subtitle_font(size: int = 32):
     return ImageFont.load_default()
 
 
-def expand_draft_into_scenes(draft_text: str, max_scenes: int = 10) -> list[str]:
-    """Splits a draft story into sequential scene beats and extends smoothly up to max_scenes."""
+def has_kannada_font() -> bool:
+    for path in (
+        "/usr/share/fonts/truetype/noto/NotoSansKannada-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
+    ):
+        if os.path.exists(path):
+            return True
+    return False
+
+
+def develop_scenes_from_draft(draft_text: str, target_scenes: int = 6) -> list[dict]:
+    """Develops raw draft thoughts into structured scene writing entries up to target_scenes."""
     raw = (draft_text or "").strip()
     if not raw:
-        raw = "Village farming story with coconut and sugarcane."
+        raw = "A villager tends coconut palms and sugarcane in the morning and builds a peaceful life."
 
-    parts = [
-        p.strip(" .!?,;:-")
-        for p in re.split(r"[.!?\n।]+", raw)
-        if p.strip(" .!?,;:-")
+    raw_sentences = [
+        s.strip(" .!?,;:-")
+        for s in re.split(r"[.!?\n।]+", raw)
+        if s.strip(" .!?,;:-")
     ]
-    if not parts:
-        parts = [raw]
+    if not raw_sentences:
+        raw_sentences = [raw]
 
-    # If the draft has fewer beats than max_scenes, expand clauses or progression beats
-    expanded: list[str] = []
-    for part in parts:
-        sub_clauses = [c.strip() for c in re.split(r"\s+(?:and|then|while|with|but|ಮತ್ತು|ಹಾಗೂ|ನಂತರ)\s+", part) if c.strip()]
-        if len(sub_clauses) > 1 and len(expanded) + len(sub_clauses) <= max_scenes:
-            expanded.extend(sub_clauses)
+    beats: list[str] = []
+    for sent in raw_sentences:
+        clauses = [
+            c.strip()
+            for c in re.split(r"\s+(?:and|then|while|with|but|ಮತ್ತು|ಹಾಗೂ|ನಂತರ)\s+", sent)
+            if c.strip()
+        ]
+        if len(clauses) > 1 and len(beats) + len(clauses) <= target_scenes:
+            beats.extend(clauses)
         else:
-            expanded.append(part)
+            beats.append(sent)
 
-    progression_angles = [
-        "Opening establishing scene",
-        "Character action and daily routine",
-        "Close-up detail and effort",
-        "Environment mood and surroundings",
-        "Turning point in the story",
-        "Progress and steady growth",
-        "Community and family moment",
-        "Resolution and positive takeaway",
-        "Closing reflection shot",
-        "Final summary frame",
+    progression = [
+        "Opening scene setting the mood and location",
+        "Main character introduced in action",
+        "Key daily activity and hands-on effort",
+        "Close-up visual detail of the environment",
+        "Challenge or turning point in the moment",
+        "Steady progress and determination",
+        "Supporting detail or interaction",
+        "Emotional shift and clarity",
+        "Positive outcome taking shape",
+        "Warm resolution and reflection",
+        "Closing visual beat",
+        "Final concluding frame",
     ]
 
     idx = 0
-    while len(expanded) < max_scenes:
-        base_beat = expanded[idx % len(expanded)]
-        angle = progression_angles[len(expanded) % len(progression_angles)]
-        expanded.append(f"{base_beat} — {angle}")
+    while len(beats) < target_scenes:
+        base = beats[idx % len(beats)]
+        note = progression[len(beats) % len(progression)]
+        beats.append(f"{base} — {note}")
         idx += 1
 
-    return expanded[:max_scenes]
+    beats = beats[:target_scenes]
+    items = []
+    for i, b in enumerate(beats):
+        items.append({
+            "scene_no": i + 1,
+            "narration": b,
+            "visual_prompt": f"Animated scene {i + 1}: {b}",
+            "motion": st.session_state.anim_preset,
+        })
+    return items
 
 
-def build_storyboard_slide(beat_text: str, scene_num: int, total_scenes: int) -> Image.Image:
-    """Creates a clean storyboard card from a draft beat (no stick figures)."""
+def render_scene_frame(scene_info: dict, total_scenes: int) -> Image.Image:
+    """Creates a clean animated scene frame without broken Kannada glyph boxes."""
     w, h = 1280, 720
+    idx = max(0, int(scene_info.get("scene_no", 1)) - 1)
     palettes = [
-        ((18, 34, 56), (98, 210, 165)),
-        ((24, 44, 48), (255, 204, 102)),
-        ((34, 28, 58), (130, 198, 255)),
-        ((46, 34, 24), (255, 178, 102)),
+        ((16, 32, 54), (92, 214, 168)),
+        ((24, 42, 46), (255, 202, 98)),
+        ((32, 26, 56), (132, 198, 255)),
+        ((46, 33, 22), (255, 174, 96)),
     ]
-    bg, accent = palettes[(scene_num - 1) % len(palettes)]
+    bg, accent = palettes[idx % len(palettes)]
     img = Image.new("RGB", (w, h), bg)
     draw = ImageDraw.Draw(img)
-    font_sub = load_subtitle_font(30)
+    font_title = load_font(34, prefer_kannada=False)
+    font_body = load_font(28, prefer_kannada=False)
 
-    # Frame border & header strip
-    draw.rounded_rectangle([36, 36, w - 36, h - 36], radius=18, outline=accent, width=3)
-    draw.rectangle([56, 56, w - 56, 118], fill=(12, 16, 26))
-    draw.text((78, 74), f"SCENE {scene_num} OF {total_scenes}  |  DRAFT STORYBOARD", fill=accent)
+    draw.rounded_rectangle([32, 32, w - 32, h - 32], radius=18, outline=accent, width=3)
+    draw.rectangle([52, 52, w - 52, 114], fill=(12, 16, 26))
+    draw.text(
+        (72, 68),
+        f"SCENE {scene_info.get('scene_no', 1)} / {total_scenes}   •   MOTION: {scene_info.get('motion', 'Zoom')}",
+        fill=accent,
+        font=font_title,
+    )
 
-    # Wrap beat text cleanly across lines
-    words = beat_text.split()
-    lines = []
-    cur = ""
+    desc = scene_info.get("visual_prompt") or scene_info.get("narration") or ""
+    # Safe ASCII display on canvas so missing Kannada fonts never draw boxes
+    safe_desc = desc.encode("ascii", "ignore").decode("ascii").strip()
+    if not safe_desc:
+        safe_desc = f"Scene {scene_info.get('scene_no', 1)} Story Frame"
+
+    words = safe_desc.split()
+    lines, cur = [], ""
     for word in words:
         test = f"{cur} {word}".strip()
-        if len(test) <= 52:
+        if len(test) <= 56:
             cur = test
         else:
             if cur:
@@ -249,21 +289,111 @@ def build_storyboard_slide(beat_text: str, scene_num: int, total_scenes: int) ->
     if cur:
         lines.append(cur)
 
-    y_pos = 210
+    y = 195
     for line in lines[:5]:
-        draw.rectangle([76, y_pos - 6, w - 76, y_pos + 42], fill=(15, 21, 34))
-        draw.text((92, y_pos + 2), line, fill=(245, 248, 252), font=font_sub)
-        y_pos += 58
+        draw.rounded_rectangle([72, y - 6, w - 72, y + 42], radius=8, fill=(14, 20, 32))
+        draw.text((90, y + 2), line, fill=(242, 246, 252), font=font_body)
+        y += 58
 
-    draw.text((78, h - 84), "Ready for voiceover, Kannada subtitles, and timeline editing", fill=(185, 200, 220))
+    draw.text((72, h - 82), "Animated Frame Ready  |  Kannada & English Voice/Subtitles Supported", fill=(180, 198, 220), font=font_body)
     return img
 
 
-def sync_scenes_to_count(draft_text: str, count: int):
-    beats = expand_draft_into_scenes(draft_text, max_scenes=count)
-    st.session_state.story_beats = beats
-    st.session_state.scenes = [build_storyboard_slide(b, i + 1, len(beats)) for i, b in enumerate(beats)]
-    st.session_state.scene_labels = [b[:48] for b in beats]
+def sync_storyboard_to_scenes(items: list[dict]):
+    st.session_state.scene_items = items
+    st.session_state.scenes = [render_scene_frame(it, len(items)) for it in items]
+    st.session_state.scene_labels = [
+        f"Scene {it['scene_no']}: {it['narration'][:36]}" for it in items
+    ]
+    story_lines = [f"Scene {it['scene_no']}: {it['narration']}" for it in items]
+    st.session_state.finalized_story = "\n".join(story_lines)
+
+
+def build_animated_frames(base_img: Image.Image, preset: str, num_frames: int = 10) -> list[Image.Image]:
+    w, h = base_img.size
+    frames = []
+    src = base_img.convert("RGB")
+    for i in range(max(2, num_frames)):
+        t = i / max(1, num_frames - 1)
+        if st.session_state.easing == "Ease-In":
+            e = t * t
+        elif st.session_state.easing == "Ease-Out":
+            e = 1.0 - (1.0 - t) * (1.0 - t)
+        elif st.session_state.easing == "Ease-In-Out":
+            e = 3 * t * t - 2 * t * t * t
+        else:
+            e = t
+
+        if "Zoom-In" in preset:
+            zoom = 1.0 + 0.14 * e
+            nw, nh = int(w / zoom), int(h / zoom)
+            left = (w - nw) // 2
+            top = (h - nh) // 2
+            fr = src.crop((left, top, left + nw, top + nh)).resize((w, h), Image.Resampling.LANCZOS)
+        elif "Zoom-Out" in preset:
+            zoom = 1.14 - 0.14 * e
+            nw, nh = int(w / zoom), int(h / zoom)
+            left = (w - nw) // 2
+            top = (h - nh) // 2
+            fr = src.crop((left, top, left + nw, top + nh)).resize((w, h), Image.Resampling.LANCZOS)
+        elif "Pan" in preset:
+            shift_max = max(2, int(w * 0.08))
+            left = int(shift_max * e)
+            fr = src.crop((left, 0, w - (shift_max - left), h)).resize((w, h), Image.Resampling.LANCZOS)
+        elif "Drift" in preset:
+            dy = int(28 * (e - 0.5))
+            fr = ImageOps.pad(src, (w, h), color=(14, 18, 28), centering=(0.5, 0.5 + dy / max(1, h)))
+        elif "Pulse" in preset:
+            factor = 1.0 + 0.18 * abs(e - 0.5) * 2.0
+            fr = ImageEnhance.Brightness(src).enhance(factor)
+        else:
+            fr = src.copy()
+        frames.append(fr)
+    return frames
+
+
+def apply_frame_edits(img: Image.Image) -> Image.Image:
+    out = img.convert("RGB")
+    if st.session_state.rotation:
+        out = out.rotate(-st.session_state.rotation, expand=True)
+    if st.session_state.flip_h:
+        out = ImageOps.mirror(out)
+
+    fname = st.session_state.filter_name
+    if fname == "Vivid":
+        out = ImageEnhance.Color(out).enhance(1.45)
+        out = ImageEnhance.Contrast(out).enhance(1.15)
+    elif fname == "Warm":
+        r, g, b = out.split()
+        r = r.point(lambda x: min(255, int(x * 1.12)))
+        b = b.point(lambda x: max(0, int(x * 0.90)))
+        out = Image.merge("RGB", (r, g, b))
+    elif fname == "Noir / B&W":
+        out = ImageOps.grayscale(out).convert("RGB")
+    elif fname == "Soft Glow":
+        blurred = out.filter(ImageFilter.GaussianBlur(radius=4))
+        out = Image.blend(out, blurred, 0.35)
+
+    if st.session_state.opacity < 1.0:
+        dark_bg = Image.new("RGB", out.size, (12, 12, 16))
+        out = Image.blend(dark_bg, out, st.session_state.opacity)
+
+    draw = ImageDraw.Draw(out)
+    w, h = out.size
+    sub_txt = st.session_state.subtitle_line.strip()
+    if sub_txt:
+        if has_kannada_font() or sub_txt.isascii():
+            font_sub = load_font(28, prefer_kannada=True)
+            box_w = min(w - 80, max(360, len(sub_txt) * 18 + 60))
+            bx0 = (w - box_w) // 2
+            by0 = h - 120
+            draw.rounded_rectangle([bx0, by0, bx0 + box_w, by0 + 64], radius=10, fill=(14, 15, 20))
+            draw.text((bx0 + 22, by0 + 16), sub_txt[:75], fill=(255, 255, 255), font=font_sub)
+
+    sticker_ascii = st.session_state.sticker_text.encode("ascii", "ignore").decode("ascii").strip()
+    if sticker_ascii:
+        draw.text((max(20, w - 180), 42), sticker_ascii, fill=(255, 230, 120), font=load_font(26, prefer_kannada=False))
+    return out
 
 
 async def generate_tts_and_srt(text: str, voice: str, rate: str, pitch: str):
@@ -295,103 +425,44 @@ async def generate_tts_and_srt(text: str, voice: str, rate: str, pitch: str):
     return audio_buf.getvalue(), srt_str
 
 
-def build_motion_frames(base_img: Image.Image, motion_preset: str, num_frames: int = 8) -> list[Image.Image]:
-    w, h = base_img.size
-    frames = []
-    src = base_img.convert("RGB")
-    for i in range(num_frames):
-        t = i / max(1, num_frames - 1)
-        if "Zoom" in motion_preset:
-            zoom = 1.0 + 0.12 * t
-            nw, nh = int(w / zoom), int(h / zoom)
-            left = (w - nw) // 2
-            top = (h - nh) // 2
-            crop = src.crop((left, top, left + nw, top + nh)).resize((w, h), Image.Resampling.LANCZOS)
-        elif "Pan" in motion_preset:
-            max_shift = max(1, int(w * 0.08))
-            left = int(max_shift * t)
-            crop = src.crop((left, 0, w - (max_shift - left), h)).resize((w, h), Image.Resampling.LANCZOS)
-        elif "Drift" in motion_preset:
-            shift_y = int(24 * (t - 0.5))
-            crop = ImageOps.pad(src, (w, h), color=(15, 18, 28), centering=(0.5, 0.5 + shift_y / max(1, h)))
-        else:
-            crop = src.copy()
-        frames.append(crop)
-    return frames
-
-
-def apply_inshot_frame_edits(img: Image.Image) -> Image.Image:
-    out = img.convert("RGB")
-    if st.session_state.rotation:
-        out = out.rotate(-st.session_state.rotation, expand=True)
-    if st.session_state.flip_h:
-        out = ImageOps.mirror(out)
-
-    fname = st.session_state.filter_name
-    if fname == "Vivid":
-        out = ImageEnhance.Color(out).enhance(1.45)
-        out = ImageEnhance.Contrast(out).enhance(1.15)
-    elif fname == "Warm":
-        r, g, b = out.split()
-        r = r.point(lambda x: min(255, int(x * 1.12)))
-        b = b.point(lambda x: max(0, int(x * 0.90)))
-        out = Image.merge("RGB", (r, g, b))
-    elif fname == "Noir / B&W":
-        out = ImageOps.grayscale(out).convert("RGB")
-    elif fname == "Soft Glow":
-        blurred = out.filter(ImageFilter.GaussianBlur(radius=4))
-        out = Image.blend(out, blurred, 0.35)
-
-    if st.session_state.opacity < 1.0:
-        dark_bg = Image.new("RGB", out.size, (12, 12, 16))
-        out = Image.blend(dark_bg, out, st.session_state.opacity)
-
-    draw = ImageDraw.Draw(out)
-    font_sub = load_subtitle_font(30)
-    w, h = out.size
-    sub_txt = st.session_state.subtitle_line.strip()
-    if sub_txt:
-        box_w = min(w - 80, max(360, len(sub_txt) * 20 + 60))
-        bx0 = (w - box_w) // 2
-        by0 = h - 125
-        draw.rounded_rectangle([bx0, by0, bx0 + box_w, by0 + 68], radius=10, fill=(14, 15, 20))
-        draw.text((bx0 + 24, by0 + 16), sub_txt, fill=(255, 255, 255), font=font_sub)
-    if st.session_state.sticker_text.strip():
-        draw.text((max(20, w - 200), 28), st.session_state.sticker_text.strip(), fill=(255, 255, 255), font=font_sub)
-    return out
-
-
-def render_mp4_from_scenes(scenes: list[Image.Image], audio_bytes: bytes | None, fps: int = 12) -> bytes | None:
-    if not scenes or not HAS_IMAGEIO:
-        return None
+def render_final_mp4(scenes: list[Image.Image], audio_bytes: bytes | None) -> tuple[bytes | None, str]:
+    if not scenes:
+        return None, "Add or generate at least one scene first."
+    if not HAS_IMAGEIO:
+        return None, "`imageio` / `imageio-ffmpeg` is not available in this environment."
     try:
-        expanded = []
+        all_frames = []
         for sc in scenes:
-            edited = apply_inshot_frame_edits(sc).resize((1280, 720))
-            expanded.extend(build_motion_frames(edited, "Ken Burns Zoom-In", num_frames=6))
+            edited = apply_frame_edits(sc).resize((1280, 720), Image.Resampling.LANCZOS)
+            all_frames.extend(
+                build_animated_frames(edited, st.session_state.anim_preset, num_frames=st.session_state.anim_frames)
+            )
+        if st.session_state.transition == "Crossfade" and len(all_frames) > 4:
+            all_frames = all_frames[::1]  # Smooth sequence
 
-        tmp_dir = tempfile.mkdtemp(prefix="kkm_render_")
-        raw_mp4 = os.path.join(tmp_dir, "raw_scenes.mp4")
-        iio.imwrite(raw_mp4, [f for f in expanded], fps=fps, codec="libx264")
+        tmp_dir = tempfile.mkdtemp(prefix="kkm_studio_render_")
+        raw_mp4 = os.path.join(tmp_dir, "raw_video.mp4")
+        iio.imwrite(raw_mp4, all_frames, fps=st.session_state.anim_fps, codec="libx264")
 
         if audio_bytes:
-            audio_mp3 = os.path.join(tmp_dir, "voice.mp3")
-            final_mp4 = os.path.join(tmp_dir, "final_output.mp4")
-            with open(audio_mp3, "wb") as af:
+            aud_path = os.path.join(tmp_dir, "voiceover.mp3")
+            mux_mp4 = os.path.join(tmp_dir, "final_video.mp4")
+            with open(aud_path, "wb") as af:
                 af.write(audio_bytes)
-            cmd = [
-                "ffmpeg", "-y", "-i", raw_mp4, "-i", audio_mp3,
-                "-c:v", "copy", "-c:a", "aac", "-shortest", final_mp4,
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if res.returncode == 0 and os.path.exists(final_mp4):
-                with open(final_mp4, "rb") as out_f:
-                    return out_f.read()
+            res = subprocess.run(
+                ["ffmpeg", "-y", "-i", raw_mp4, "-i", aud_path, "-c:v", "copy", "-c:a", "aac", "-shortest", mux_mp4],
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+            if res.returncode == 0 and os.path.exists(mux_mp4):
+                with open(mux_mp4, "rb") as out_f:
+                    return out_f.read(), "Rendered MP4 with voiceover audio."
 
         with open(raw_mp4, "rb") as r_f:
-            return r_f.read()
-    except Exception:
-        return None
+            return r_f.read(), "Rendered MP4 video."
+    except Exception as exc:
+        return None, f"Render error: {exc}"
 
 
 def render_video_player_html(video_bytes: bytes, start_sec: float, speed: float):
@@ -422,7 +493,7 @@ def render_video_player_html(video_bytes: bytes, start_sec: float, speed: float)
 
 
 # ==============================================================================
-# TOP: STUDIO PLAYER SCREEN (100% ENGLISH INTERFACE)
+# TOP: STUDIO PLAYER SCREEN
 # ==============================================================================
 st.markdown("## 🎬 Creator Hub Studio")
 
@@ -440,8 +511,12 @@ with screen_col:
         with open(st.session_state.pulled_video_path, "rb") as vf:
             render_video_player_html(vf.read(), st.session_state.jump_sec, st.session_state.speed)
     elif st.session_state.scenes:
-        preview_img = apply_inshot_frame_edits(st.session_state.scenes[-1])
-        st.image(preview_img, caption=f"Live Scene Monitor ({len(st.session_state.scenes)} scene(s))", use_container_width=True)
+        preview_img = apply_frame_edits(st.session_state.scenes[-1])
+        st.image(
+            preview_img,
+            caption=f"Live Scene Monitor ({len(st.session_state.scenes)} scene(s))",
+            use_container_width=True,
+        )
     else:
         st.markdown(
             """
@@ -451,7 +526,7 @@ with screen_col:
               <div style="font-size:38px;">🎞️</div>
               <div style="font-size:17px;margin-top:8px;"><b>Monitor Ready</b></div>
               <div style="font-size:13px;opacity:0.85;margin-top:4px;">
-                Write your draft story to build scenes up to 10+, upload media, or pull a video link below
+                Start in Script, Video, Voice, or Render tabs below
               </div>
             </div>
             """,
@@ -477,269 +552,357 @@ with side_col:
     st.markdown("#### Voiceover & Script")
     if st.session_state.generated_audio:
         st.audio(st.session_state.generated_audio, format="audio/mp3")
-    active_preview = (
-        st.session_state.script_kn
-        if st.session_state.voice_lang.startswith("Kannada")
-        else st.session_state.script_en
+    active_script = (
+        st.session_state.script_kn if st.session_state.voice_lang == "Kannada" else st.session_state.script_en
     )
-    if active_preview:
-        st.markdown(f'<div class="script-box">{active_preview}</div>', unsafe_allow_html=True)
+    if active_script:
+        st.markdown(f'<div class="script-box">{active_script}</div>', unsafe_allow_html=True)
+    elif st.session_state.finalized_story:
+        st.markdown(f'<div class="script-box">{st.session_state.finalized_story}</div>', unsafe_allow_html=True)
     else:
-        st.caption("No narration script generated yet.")
+        st.caption("Develop and finalize your story in the Script tab.")
 
 st.divider()
 
 # ==============================================================================
-# EDITING DOCK (ENGLISH INTERFACE)
+# 4 CORE WORKFLOW TABS (SCRIPT • VIDEO • VOICE • RENDER & DOWNLOAD)
 # ==============================================================================
-st.markdown("### Editing Controls")
-b1, b2, b3, b4, b5 = st.columns(5)
-if b1.button("✂️ Trim & Split"):
-    st.session_state.tool_group = "Trim & Cut"
-if b2.button("⚡ Speed & Motion"):
-    st.session_state.tool_group = "Speed & Motion"
-if b3.button("🎨 Filters & Rotate"):
-    st.session_state.tool_group = "Filters & Look"
-if b4.button("💬 Subtitle Overlay"):
-    st.session_state.tool_group = "Subtitle Overlay"
-if b5.button("🧩 Collage & Layout"):
-    st.session_state.tool_group = "Collage & Layout"
-
-group = st.session_state.tool_group
-if group == "Trim & Cut":
-    c1, c2, c3 = st.columns(3)
-    st.session_state.trim_start = c1.number_input("Pre-Cut Start (s)", 0.0, 120.0, float(st.session_state.trim_start), 0.5)
-    st.session_state.split_point = c2.number_input("Split Point (s)", 0.0, 120.0, float(st.session_state.split_point), 0.5)
-    st.session_state.trim_end = c3.number_input("Trim End (s)", 1.0, 180.0, float(st.session_state.trim_end), 0.5)
-elif group == "Speed & Motion":
-    c1, c2, c3 = st.columns(3)
-    st.session_state.speed = c1.select_slider("Playback Speed", [0.5, 0.75, 1.0, 1.25, 1.5, 2.0], value=st.session_state.speed)
-    st.session_state.transition = c2.selectbox("Transition", ["Crossfade", "Slide", "Zoom", "Cut"])
-    st.session_state.easing = c3.selectbox("Ease Curve", ["Linear", "Ease-In", "Ease-Out", "Ease-In-Out"])
-elif group == "Filters & Look":
-    c1, c2, c3, c4 = st.columns(4)
-    st.session_state.filter_name = c1.selectbox("Filter", ["Original", "Vivid", "Warm", "Noir / B&W", "Soft Glow"])
-    st.session_state.rotation = c2.selectbox("Rotate (°)", [0, 90, 180, 270])
-    st.session_state.opacity = c3.slider("Opacity", 0.1, 1.0, float(st.session_state.opacity), 0.05)
-    st.session_state.flip_h = c4.checkbox("Mirror Flip", value=st.session_state.flip_h)
-elif group == "Subtitle Overlay":
-    c1, c2 = st.columns([3, 1])
-    st.session_state.subtitle_line = c1.text_input("On-Screen Subtitle Line", value=st.session_state.subtitle_line)
-    st.session_state.sticker_text = c2.text_input("Stickers", value=st.session_state.sticker_text)
-else:
-    c1, c2 = st.columns(2)
-    st.session_state.collage_mode = c1.selectbox("Collage Layout", ["Single View", "Side-by-Side (2)", "Grid (4)"])
-    st.session_state.bg_remove = c2.checkbox("Background Cutout Mode", value=st.session_state.bg_remove)
-
-st.divider()
-
-# ==============================================================================
-# WORKFLOW TABS (100% ENGLISH INTERFACE)
-# ==============================================================================
-t1, t2, t3, t4 = st.tabs([
-    "🎬 Storyboard & Scenes (Up to 10+)",
-    "📜 Script & Voice (Kannada / English)",
-    "🔗 Media & Link Pull",
-    "📥 Render & Export",
+tab_script, tab_video, tab_voice, tab_render = st.tabs([
+    "1. Script & Story Builder",
+    "2. Video & Animation Studio",
+    "3. Voice & Subtitles",
+    "4. Render & Download",
 ])
 
-with t1:
-    st.subheader("Develop Scenes from Draft Story (Extend up to 10+ Scenes)")
-    draft_input = st.text_area(
-        "Draft Story (English or Kannada)",
-        value=st.session_state.script_en or st.session_state.script_kn,
-        height=120,
-        placeholder="Write your draft story here and generate scenes step by step...",
+# --- TAB 1: SCRIPT TAB (DRAFT -> SCENE WRITING -> CORRECTION & FINALIZE) ---
+with tab_script:
+    st.subheader("Draft Story to Scene Writing & Finalization")
+    st.session_state.draft_input = st.text_area(
+        "Your Draft or Thinking (English or Kannada)",
+        value=st.session_state.draft_input,
+        height=110,
+        placeholder="Write your raw idea or draft story here...",
     )
 
-    s_col1, s_col2, s_col3 = st.columns([2, 1, 1])
-    target_n = s_col1.slider(
+    sc_col1, sc_col2, sc_col3 = st.columns([2, 1, 1])
+    desired_scenes = sc_col1.slider(
         "Number of Scenes",
         min_value=1,
         max_value=12,
-        value=int(st.session_state.target_scene_count),
+        value=max(1, len(st.session_state.scene_items) if st.session_state.scene_items else 6),
     )
-    st.session_state.target_scene_count = target_n
-
-    if s_col2.button("✨ Build Scenes from Draft", type="primary"):
-        source_draft = draft_input.strip() or st.session_state.script_kn.strip() or st.session_state.script_en.strip()
-        if not st.session_state.script_en and source_draft:
-            st.session_state.script_en = source_draft
-        sync_scenes_to_count(source_draft, target_n)
+    if sc_col2.button("✍️ Develop Scenes", type="primary"):
+        items = develop_scenes_from_draft(st.session_state.draft_input, target_scenes=desired_scenes)
+        sync_storyboard_to_scenes(items)
         st.rerun()
 
-    if s_col3.button("➕ Add Scene (+1)"):
-        next_count = min(15, max(len(st.session_state.scenes) + 1, target_n + 1))
-        st.session_state.target_scene_count = next_count
-        source_draft = draft_input.strip() or st.session_state.script_kn.strip() or st.session_state.script_en.strip()
-        sync_scenes_to_count(source_draft, next_count)
+    if sc_col3.button("➕ Add Scene"):
+        current_items = list(st.session_state.scene_items)
+        if not current_items:
+            current_items = develop_scenes_from_draft(st.session_state.draft_input, target_scenes=1)
+        else:
+            next_num = len(current_items) + 1
+            current_items.append({
+                "scene_no": next_num,
+                "narration": f"Scene {next_num} continuation from draft",
+                "visual_prompt": f"Animated scene {next_num}: {st.session_state.draft_input[:60]}",
+                "motion": st.session_state.anim_preset,
+            })
+        sync_storyboard_to_scenes(current_items)
         st.rerun()
 
-    if st.session_state.scenes:
-        st.markdown(f"**Generated Storyboard Scenes: {len(st.session_state.scenes)}**")
-        for start_i in range(0, len(st.session_state.scenes), 4):
-            row_cols = st.columns(4)
-            for offset in range(4):
-                idx = start_i + offset
-                if idx < len(st.session_state.scenes):
-                    with row_cols[offset]:
-                        st.image(
-                            st.session_state.scenes[idx],
-                            caption=f"Scene {idx + 1}: {st.session_state.scene_labels[idx]}",
-                            use_container_width=True,
-                        )
-                        if st.button("👁️ Preview", key=f"prev_sc_{idx}"):
-                            st.session_state.scenes.append(st.session_state.scenes[idx])
-                            st.session_state.scene_labels.append(st.session_state.scene_labels[idx])
-                            st.rerun()
-    else:
-        st.info("Enter your draft story above and click 'Build Scenes from Draft' to create scenes up to 10 or more.")
+    if st.session_state.scene_items:
+        st.markdown("#### Scene-by-Scene Writing & Corrections")
+        updated_items = []
+        for idx, item in enumerate(st.session_state.scene_items):
+            st.markdown('<div class="scene-row">', unsafe_allow_html=True)
+            r1, r2 = st.columns([2, 2])
+            new_narr = r1.text_input(
+                f"Scene {idx + 1} Story / Narration",
+                value=item["narration"],
+                key=f"sc_narr_{idx}",
+            )
+            new_vis = r2.text_input(
+                f"Scene {idx + 1} Animation / Visual Description",
+                value=item["visual_prompt"],
+                key=f"sc_vis_{idx}",
+            )
+            updated_items.append({
+                "scene_no": idx + 1,
+                "narration": new_narr,
+                "visual_prompt": new_vis,
+                "motion": item.get("motion", st.session_state.anim_preset),
+            })
+            st.markdown("</div>", unsafe_allow_html=True)
 
-with t2:
-    st.subheader("Two-Way Script Sync (English ↔ Kannada) & Kannada / English Voiceover")
-    topic_in = st.text_input("Story / Reel Topic", "A village farmer growing coconut and sugarcane and living happily")
-    if st.button("📝 Create Story Draft"):
-        st.session_state.script_en = (
-            f"{topic_in}. He wakes up early in the village, tends his coconut palms and sugarcane fields, "
-            f"works steadily through every season, and enjoys a peaceful life with his family."
-        )
+        if st.button("✅ Save Corrections & Finalize Story", type="primary"):
+            sync_storyboard_to_scenes(updated_items)
+            st.session_state.script_en = st.session_state.finalized_story
+            st.session_state.script_kn = translate_text_free(st.session_state.finalized_story, "en", "kn")
+            st.success("Story finalized and synced to scenes and scripts.")
+            st.rerun()
+
+    st.divider()
+    st.markdown("#### Finalized Story & Two-Way Translation (English ↔ Kannada)")
+    f_col1, f_col2 = st.columns(2)
+    st.session_state.script_en = f_col1.text_area("English Story Script", value=st.session_state.script_en, height=120)
+    st.session_state.script_kn = f_col2.text_area("Kannada Story Script", value=st.session_state.script_kn, height=120)
+
+    t_b1, t_b2 = st.columns(2)
+    if t_b1.button("⬇️ Sync English → Kannada"):
         st.session_state.script_kn = translate_text_free(st.session_state.script_en, "en", "kn")
         st.rerun()
-
-    en_val = st.text_area("English Script", value=st.session_state.script_en, height=115)
-    sync_col1, sync_col2 = st.columns(2)
-    if sync_col1.button("⬇️ Translate English to Kannada"):
-        st.session_state.script_en = en_val
-        st.session_state.script_kn = translate_text_free(en_val, "en", "kn")
-        if st.session_state.voice_lang.startswith("Kannada") and st.session_state.script_kn:
-            st.session_state.subtitle_line = st.session_state.script_kn[:80]
+    if t_b2.button("⬆️ Sync Kannada → English"):
+        st.session_state.script_en = translate_text_free(st.session_state.script_kn, "kn", "en")
         st.rerun()
 
-    kn_val = st.text_area("Kannada Script", value=st.session_state.script_kn, height=115)
-    if sync_col2.button("⬆️ Translate Kannada to English"):
-        st.session_state.script_kn = kn_val
-        st.session_state.script_en = translate_text_free(kn_val, "kn", "en")
-        if not st.session_state.voice_lang.startswith("Kannada") and st.session_state.script_en:
-            st.session_state.subtitle_line = st.session_state.script_en[:80]
-        st.rerun()
+# --- TAB 2: VIDEO & ANIMATION TAB (UPLOAD, URL, ANIMATED DESCRIPTION + TAB EDITS) ---
+with tab_video:
+    st.subheader("Source Media & Animation Creator")
+    v_in1, v_in2 = st.columns(2)
 
-    st.session_state.script_en = en_val
-    st.session_state.script_kn = kn_val
+    with v_in1:
+        st.markdown("##### Pull Video from URL")
+        url_in = st.text_input("Direct Video URL", placeholder="https://...")
+        if st.button("⬇️ Fetch Video URL"):
+            if not HAS_YTDLP:
+                st.error("Add `yt-dlp` to `requirements.txt`.")
+            elif url_in.strip():
+                with st.spinner("Fetching video..."):
+                    try:
+                        tmp_d = tempfile.mkdtemp(prefix="kkm_vid_")
+                        opts = {
+                            "outtmpl": os.path.join(tmp_d, "%(title).50s.%(ext)s"),
+                            "format": "best[ext=mp4]/best",
+                            "noplaylist": True,
+                            "quiet": True,
+                        }
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            info = ydl.extract_info(url_in.strip(), download=True)
+                            st.session_state.pulled_video_path = ydl.prepare_filename(info)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not fetch URL: {exc}")
 
-    v1, v2, v3 = st.columns(3)
-    selected_lang = v1.selectbox(
-        "Voice Language",
-        ["Kannada (ಕನ್ನಡ)", "English"],
-        index=0 if st.session_state.voice_lang.startswith("Kannada") else 1,
+    with v_in2:
+        st.markdown("##### Upload Images or Videos")
+        media_files = st.file_uploader(
+            "Drag & Drop Images or Videos",
+            type=["png", "jpg", "jpeg", "webp", "mp4", "mov"],
+            accept_multiple_files=True,
+            key="tab2_media_upload",
+        )
+        if media_files:
+            for f in media_files:
+                if f.type.startswith("image/"):
+                    img_obj = Image.open(f).convert("RGB")
+                    st.session_state.scenes.append(img_obj)
+                    st.session_state.scene_labels.append(f.name)
+                elif f.type.startswith("video/"):
+                    st.session_state.final_video_bytes = f.getvalue()
+            st.rerun()
+
+    st.divider()
+    st.markdown("##### Create Animated Scene from Description")
+    a_col1, a_col2, a_col3 = st.columns([2, 1, 1])
+    anim_desc = a_col1.text_input(
+        "Animated Image / Video Description",
+        value=st.session_state.scene_items[0]["visual_prompt"] if st.session_state.scene_items else "Animated scene with smooth camera movement",
     )
-    st.session_state.voice_lang = selected_lang
-    voice_options = VOICE_CATALOG[selected_lang]
-    chosen_voice_label = v2.selectbox("Voice Speaker", list(voice_options.keys()))
-    voice_rate = v3.slider("Voice Speed (%)", -40, 40, 0)
+    st.session_state.anim_preset = a_col2.selectbox(
+        "Animation Style",
+        ["Ken Burns Zoom-In", "Ken Burns Pan-Right", "Parallax Drift", "Ken Burns Zoom-Out", "Pulse", "Static"],
+    )
+    st.session_state.anim_frames = a_col3.slider("Animation Frames per Scene", 4, 24, int(st.session_state.anim_frames))
+
+    if st.button("🎞️ Create Animated Scene", type="primary"):
+        next_no = len(st.session_state.scenes) + 1
+        new_entry = {"scene_no": next_no, "narration": anim_desc, "visual_prompt": anim_desc, "motion": st.session_state.anim_preset}
+        frame_img = render_scene_frame(new_entry, max(next_no, len(st.session_state.scene_items) or 1))
+        st.session_state.scenes.append(frame_img)
+        st.session_state.scene_labels.append(f"Anim {next_no}: {anim_desc[:32]}")
+        st.rerun()
+
+    st.divider()
+    st.markdown("##### Video & Animation Editing Tools")
+    em1, em2, em3, em4 = st.columns(4)
+    if em1.button("⚡ Motion & Speed"):
+        st.session_state.edit_mode = "Motion & Speed"
+    if em2.button("✂️ Trim & Split"):
+        st.session_state.edit_mode = "Trim & Split"
+    if em3.button("🎨 Filters & Transform"):
+        st.session_state.edit_mode = "Filters & Transform"
+    if em4.button("💬 Overlays & Collage"):
+        st.session_state.edit_mode = "Overlays & Collage"
+
+    if st.session_state.edit_mode == "Motion & Speed":
+        ec1, ec2, ec3 = st.columns(3)
+        st.session_state.speed = ec1.select_slider("Playback Speed", [0.5, 0.75, 1.0, 1.25, 1.5, 2.0], value=st.session_state.speed)
+        st.session_state.easing = ec2.selectbox("Animation Easing", ["Ease-In-Out", "Ease-In", "Ease-Out", "Linear"])
+        st.session_state.transition = ec3.selectbox("Scene Transition", ["Crossfade", "Slide", "Zoom", "Cut"])
+    elif st.session_state.edit_mode == "Trim & Split":
+        ec1, ec2, ec3 = st.columns(3)
+        st.session_state.trim_start = ec1.number_input("Start (s)", 0.0, 180.0, float(st.session_state.trim_start), 0.5)
+        st.session_state.split_point = ec2.number_input("Split (s)", 0.0, 180.0, float(st.session_state.split_point), 0.5)
+        st.session_state.trim_end = ec3.number_input("End (s)", 1.0, 240.0, float(st.session_state.trim_end), 0.5)
+    elif st.session_state.edit_mode == "Filters & Transform":
+        ec1, ec2, ec3, ec4 = st.columns(4)
+        st.session_state.filter_name = ec1.selectbox("Filter", ["Original", "Vivid", "Warm", "Noir / B&W", "Soft Glow"])
+        st.session_state.rotation = ec2.selectbox("Rotate (°)", [0, 90, 180, 270])
+        st.session_state.opacity = ec3.slider("Opacity", 0.1, 1.0, float(st.session_state.opacity), 0.05)
+        st.session_state.flip_h = ec4.checkbox("Mirror Flip", value=st.session_state.flip_h)
+    else:
+        ec1, ec2, ec3 = st.columns(3)
+        st.session_state.subtitle_line = ec1.text_input("Subtitle Overlay Text", value=st.session_state.subtitle_line)
+        st.session_state.sticker_text = ec2.text_input("Badge / Sticker", value=st.session_state.sticker_text)
+        st.session_state.collage_mode = ec3.selectbox("Layout", ["Single View", "Side-by-Side (2)", "Grid (4)"])
+
+    if st.session_state.scenes:
+        st.markdown("##### Scene Strip")
+        strip_cols = st.columns(min(4, len(st.session_state.scenes)))
+        for idx, sc in enumerate(st.session_state.scenes[-4:]):
+            lbl = st.session_state.scene_labels[-4:][idx]
+            with strip_cols[idx]:
+                st.image(apply_frame_edits(sc), caption=lbl, use_container_width=True)
+
+# --- TAB 3: VOICE TAB (UPLOAD, BUILT-IN KANNADA/ENGLISH, FROM URL) ---
+with tab_voice:
+    st.subheader("Voiceover & Subtitles (Built-In Kannada / English, Upload, or URL)")
+    v_src1, v_src2 = st.columns(2)
+
+    with v_src1:
+        st.markdown("##### Upload Voiceover Audio")
+        up_audio = st.file_uploader("Upload MP3 / WAV Audio", type=["mp3", "wav", "m4a", "ogg"], key="tab3_audio_up")
+        if up_audio is not None:
+            st.session_state.generated_audio = up_audio.getvalue()
+            st.success("Uploaded audio loaded for playback and rendering.")
+
+    with v_src2:
+        st.markdown("##### Pull Audio from URL")
+        aud_url = st.text_input("Direct Audio / Media URL", placeholder="https://...")
+        if st.button("⬇️ Fetch Audio URL"):
+            if not HAS_YTDLP:
+                st.error("Add `yt-dlp` to `requirements.txt`.")
+            elif aud_url.strip():
+                with st.spinner("Fetching audio..."):
+                    try:
+                        tmp_d = tempfile.mkdtemp(prefix="kkm_aud_")
+                        opts = {
+                            "outtmpl": os.path.join(tmp_d, "audio.%(ext)s"),
+                            "format": "bestaudio/best",
+                            "noplaylist": True,
+                            "quiet": True,
+                        }
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            info = ydl.extract_info(aud_url.strip(), download=True)
+                            dl_path = ydl.prepare_filename(info)
+                        with open(dl_path, "rb") as af:
+                            st.session_state.generated_audio = af.read()
+                        st.success("Audio pulled from URL.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Audio URL pull failed: {exc}")
+
+    st.divider()
+    st.markdown("##### Built-In Neural Voice Generator (Kannada & English)")
+    vc1, vc2, vc3 = st.columns(3)
+    chosen_lang = vc1.selectbox(
+        "Voice Language",
+        ["Kannada", "English"],
+        index=0 if st.session_state.voice_lang == "Kannada" else 1,
+    )
+    st.session_state.voice_lang = chosen_lang
+    speakers = VOICE_CATALOG[chosen_lang]
+    chosen_speaker = vc2.selectbox("Voice Speaker", list(speakers.keys()))
+    v_rate = vc3.slider("Speaking Rate (%)", -40, 40, 0)
+
+    default_tts_text = (
+        st.session_state.script_kn.strip()
+        if chosen_lang == "Kannada"
+        else st.session_state.script_en.strip()
+    )
+    tts_text = st.text_area("Narration Text for Voice & Subtitles", value=default_tts_text, height=115)
 
     if st.button("🎙️ Generate Voice & Subtitles", type="primary"):
         if not HAS_EDGE_TTS:
             st.error("Add `edge-tts` to `requirements.txt`.")
         else:
-            narration_text = (
-                st.session_state.script_kn.strip()
-                if selected_lang.startswith("Kannada")
-                else st.session_state.script_en.strip()
+            clean_tts = tts_text.strip() or (
+                "ನಮಸ್ಕಾರ! ಕ್ರಿಯೇಟರ್ ಹಬ್ ಸ್ಟುಡಿಯೋಗೆ ಸ್ವಾಗತ." if chosen_lang == "Kannada" else "Welcome to Creator Hub Studio."
             )
-            if not narration_text:
-                narration_text = "ನಮಸ್ಕಾರ! ಕ್ರಿಯೇಟರ್ ಹಬ್ ಸ್ಟುಡಿಯೋಗೆ ಸ್ವಾಗತ." if selected_lang.startswith("Kannada") else "Welcome to Creator Hub Studio!"
             with st.spinner("Generating voiceover and subtitles..."):
-                audio_bytes, srt_data = run_async(
+                audio_bytes, srt_out = run_async(
                     generate_tts_and_srt(
-                        narration_text,
-                        voice_options[chosen_voice_label],
-                        f"{voice_rate:+d}%",
+                        clean_tts,
+                        speakers[chosen_speaker],
+                        f"{v_rate:+d}%",
                         "+0Hz",
                     )
                 )
                 st.session_state.generated_audio = audio_bytes
-                st.session_state.subtitles_srt = srt_data
-                st.session_state.subtitle_line = narration_text[:80]
+                st.session_state.subtitles_srt = srt_out
+                if chosen_lang == "Kannada":
+                    st.session_state.script_kn = clean_tts
+                else:
+                    st.session_state.script_en = clean_tts
+                st.session_state.subtitle_line = clean_tts[:80]
                 st.rerun()
 
-with t3:
-    st.subheader("Pull Video from Link or Upload Your Images & Videos")
-    url_in = st.text_input("Direct Video Link (YouTube / Instagram / Facebook)")
-    if st.button("⬇️ Pull Video from Link"):
-        if not HAS_YTDLP:
-            st.error("Add `yt-dlp` to `requirements.txt`.")
-        elif url_in.strip():
-            with st.spinner("Fetching video..."):
-                try:
-                    tmp_d = tempfile.mkdtemp(prefix="kkm_dl_")
-                    opts = {
-                        "outtmpl": os.path.join(tmp_d, "%(title).50s.%(ext)s"),
-                        "format": "best[ext=mp4]/best",
-                        "noplaylist": True,
-                        "quiet": True,
-                    }
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(url_in.strip(), download=True)
-                        p = ydl.prepare_filename(info)
-                    st.session_state.pulled_video_path = p
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Link pull failed: {exc}")
+    if st.session_state.generated_audio:
+        st.audio(st.session_state.generated_audio, format="audio/mp3")
+    if st.session_state.subtitles_srt:
+        st.text_area("Generated Subtitles (SRT)", value=st.session_state.subtitles_srt, height=130)
 
-    uploads = st.file_uploader(
-        "Drag & Drop Your Images or Videos",
-        type=["png", "jpg", "jpeg", "webp", "mp4", "mov"],
-        accept_multiple_files=True,
+# --- TAB 4: RENDER & DOWNLOAD TAB ---
+with tab_render:
+    st.subheader("Render Final Video & Download Assets")
+    rc1, rc2 = st.columns(2)
+    st.session_state.anim_fps = rc1.select_slider("Export FPS", options=[12, 24, 30], value=int(st.session_state.anim_fps))
+    st.session_state.transition = rc2.selectbox(
+        "Export Transition Mode",
+        ["Crossfade", "Slide", "Zoom", "Cut"],
+        index=["Crossfade", "Slide", "Zoom", "Cut"].index(st.session_state.transition),
     )
-    if uploads:
-        for f in uploads:
-            if f.type.startswith("image/"):
-                st.session_state.scenes.append(Image.open(f).convert("RGB"))
-                st.session_state.scene_labels.append(f.name)
-            elif f.type.startswith("video/"):
-                st.session_state.final_video_bytes = f.getvalue()
-        st.rerun()
 
-with t4:
-    st.subheader("Render Video & Download Assets")
-    if st.button("🎬 Render MP4 Video"):
+    if st.button("🎬 Render MP4 Video", type="primary"):
         with st.spinner("Rendering MP4 video..."):
-            mp4_out = render_mp4_from_scenes(st.session_state.scenes, st.session_state.generated_audio)
-            if mp4_out:
-                st.session_state.final_video_bytes = mp4_out
-                st.success("MP4 video rendered!")
+            mp4_bytes, render_msg = render_final_mp4(st.session_state.scenes, st.session_state.generated_audio)
+            if mp4_bytes:
+                st.session_state.final_video_bytes = mp4_bytes
+                st.success(render_msg)
                 st.rerun()
             else:
-                st.info("Build or upload at least one scene first and ensure `imageio` and `imageio-ffmpeg` are in `requirements.txt`.")
+                st.warning(render_msg)
 
-    active_script_txt = (
+    st.divider()
+    dl1, dl2, dl3, dl4 = st.columns(4)
+    script_export = (
         st.session_state.script_kn
-        if st.session_state.voice_lang.startswith("Kannada")
-        else st.session_state.script_en
+        if st.session_state.voice_lang == "Kannada"
+        else (st.session_state.script_en or st.session_state.finalized_story)
     )
-    d1, d2, d3, d4 = st.columns(4)
-    if active_script_txt:
-        d1.download_button(
-            "⬇️ Script (.txt)",
-            data=active_script_txt.encode("utf-8"),
-            file_name="kannada_script.txt" if st.session_state.voice_lang.startswith("Kannada") else "english_script.txt",
+    if script_export:
+        dl1.download_button(
+            "⬇️ Download Script (.txt)",
+            data=script_export.encode("utf-8"),
+            file_name="kannada_script.txt" if st.session_state.voice_lang == "Kannada" else "english_script.txt",
         )
     if st.session_state.subtitles_srt:
-        d2.download_button(
-            "⬇️ Subtitles (.srt)",
+        dl2.download_button(
+            "⬇️ Download Subtitles (.srt)",
             data=st.session_state.subtitles_srt.encode("utf-8"),
-            file_name="kannada_subtitles.srt" if st.session_state.voice_lang.startswith("Kannada") else "english_subtitles.srt",
+            file_name="kannada_subtitles.srt" if st.session_state.voice_lang == "Kannada" else "english_subtitles.srt",
         )
     if st.session_state.generated_audio:
-        d3.download_button(
-            "⬇️ Voiceover (.mp3)",
+        dl3.download_button(
+            "⬇️ Download Voiceover (.mp3)",
             data=st.session_state.generated_audio,
-            file_name="kannada_voiceover.mp3" if st.session_state.voice_lang.startswith("Kannada") else "english_voiceover.mp3",
+            file_name="voiceover.mp3",
             mime="audio/mpeg",
         )
     if st.session_state.final_video_bytes:
-        d4.download_button(
-            "⬇️ Rendered Video (.mp4)",
+        dl4.download_button(
+            "⬇️ Download Video (.mp4)",
             data=st.session_state.final_video_bytes,
             file_name="creator_hub_video.mp4",
             mime="video/mp4",
