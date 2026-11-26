@@ -1,10 +1,13 @@
 import asyncio
+import base64
 import io
 import os
 import tempfile
-import time
+import urllib.parse
 import streamlit as st
-from PIL import Image, ImageDraw, ImageOps
+import streamlit.components.v1 as components
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+import requests
 
 try:
     import edge_tts
@@ -22,37 +25,35 @@ st.set_page_config(
     page_title="Creator Hub Studio — Kannada Edition",
     page_icon="🎬",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # --- SESSION STATE ---
 defaults = {
-    "source_script_en": "",
     "kannada_script": "",
     "subtitles_srt": "",
     "pulled_video_path": None,
-    "uploaded_media": [],
     "scenes": [],
+    "scene_captions": [],
     "generated_audio": None,
-    "final_video": None,
-    "edit_settings": {
-        "aspect_ratio": "9:16 (Reels/Shorts)",
-        "fps": 30,
-        "speed": 1.0,
-        "opacity": 1.0,
-        "rotation": 0,
-        "flip_h": False,
-        "filter_mode": "None",
-        "transition": "Cross Dissolve",
-        "easing": "Ease-In-Out",
-        "pip_enabled": False,
-        "bg_remove_mode": "Off",
-        "mask_shape": "None",
-        "collage_layout": "Single",
-        "reversed": False,
-        "freeze_sec": 0.0,
-        "voice_enhance": True,
-    },
+    "final_video_bytes": None,
+    "jump_sec": 0.0,
+    "tool_group": "Trim & Cut",
+    "speed": 1.0,
+    "trim_start": 0.0,
+    "trim_end": 30.0,
+    "split_point": 15.0,
+    "opacity": 1.0,
+    "rotation": 0,
+    "flip_h": False,
+    "filter_name": "Original",
+    "transition": "Crossfade",
+    "easing": "Ease-In-Out",
+    "sticker_text": "🔥✨💡",
+    "kannada_overlay": "ಕನ್ನಡ ಕಂಟೆಂಟ್ ಸ್ಟುಡಿಯೋ",
+    "collage_mode": "Single View",
+    "bg_remove": False,
+    "voice_enhance": True,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -75,362 +76,379 @@ def run_async(coro):
 
 async def generate_kannada_tts_and_srt(text: str, voice: str, rate: str, pitch: str):
     audio_buf = io.BytesIO()
-    srt_entries = []
+    srt_lines = []
     idx = 1
     communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
 
-    def fmt_time(sec_float: float) -> str:
-        ms = int(round(sec_float * 1000))
-        h = ms // 3600000
-        m = (ms % 3600000) // 60000
-        s = (ms % 60000) // 1000
-        rem_ms = ms % 1000
-        return f"{h:02d}:{m:02d}:{s:02d},{rem_ms:03d}"
+    def fmt_srt(sec: float) -> str:
+        total_ms = max(0, int(round(sec * 1000)))
+        h = total_ms // 3_600_000
+        m = (total_ms % 3_600_000) // 60_000
+        s = (total_ms % 60_000) // 1000
+        ms = total_ms % 1000
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             audio_buf.write(chunk["data"])
         elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
-            offset_sec = chunk["offset"] / 10_000_000
-            dur_sec = chunk["duration"] / 10_000_000
-            start_str = fmt_time(offset_sec)
-            end_str = fmt_time(offset_sec + max(dur_sec, 0.35))
-            word_txt = chunk.get("text", "").strip()
-            if word_txt:
-                srt_entries.append(f"{idx}\n{start_str} --> {end_str}\n{word_txt}\n")
+            start_s = chunk["offset"] / 10_000_000
+            dur_s = max(chunk["duration"] / 10_000_000, 0.35)
+            word = chunk.get("text", "").strip()
+            if word:
+                srt_lines.append(f"{idx}\n{fmt_srt(start_s)} --> {fmt_srt(start_s + dur_s)}\n{word}\n")
                 idx += 1
 
-    srt_text = "\n".join(srt_entries) if srt_entries else f"1\n00:00:00,000 --> 00:00:05,000\n{text}\n"
-    return audio_buf.getvalue(), srt_text
+    srt_str = "\n".join(srt_lines) if srt_lines else f"1\n00:00:00,000 --> 00:00:05,000\n{text}\n"
+    return audio_buf.getvalue(), srt_str
 
 
-def pull_video_from_link(url: str, out_dir: str):
-    ydl_opts = {
-        "outtmpl": os.path.join(out_dir, "%(title).60s.%(ext)s"),
-        "format": "best[ext=mp4]/best",
-        "noplaylist": True,
-        "quiet": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        if not os.path.exists(filename):
-            base, _ = os.path.splitext(filename)
-            for ext in (".mp4", ".mkv", ".webm"):
-                if os.path.exists(base + ext):
-                    filename = base + ext
-                    break
-        return filename, info.get("title", "Pulled Video")
+def generate_ai_character_image(prompt: str, style: str, api_key: str = "") -> Image.Image:
+    """Calls Pollinations image API when key is provided; falls back to styled character art."""
+    full_prompt = f"{style} character animation scene, expressive character, clean composition, {prompt}"
+    if api_key.strip():
+        try:
+            encoded = urllib.parse.quote(full_prompt)
+            url = f"https://gen.pollinations.ai/image/{encoded}?model=flux&width=768&height=1280&key={urllib.parse.quote(api_key.strip())}"
+            resp = requests.get(url, timeout=25)
+            if resp.status_code == 200 and resp.content:
+                return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        except Exception:
+            pass
+
+    # Styled fallback character illustration (never a plain blue screen)
+    w, h = 768, 1280
+    img = Image.new("RGB", (w, h), (26, 22, 42))
+    draw = ImageDraw.Draw(img)
+    # Warm radial-like backdrop bands
+    draw.ellipse([-120, 140, 888, 1140], fill=(45, 36, 72))
+    draw.ellipse([80, 260, 688, 860], fill=(68, 48, 96))
+    # Character silhouette + stylized head/shoulders
+    draw.ellipse([284, 340, 484, 540], fill=(242, 196, 155))  # Head
+    draw.pieslice([284, 325, 484, 455], start=180, end=360, fill=(35, 28, 46))  # Hair
+    draw.ellipse([342, 425, 366, 449], fill=(28, 25, 35))  # Left eye
+    draw.ellipse([402, 425, 426, 449], fill=(28, 25, 35))  # Right eye
+    draw.arc([356, 460, 412, 495], start=15, end=165, fill=(185, 78, 78), width=4)  # Smile
+    draw.rounded_rectangle([210, 550, 558, 940], radius=70, fill=(235, 130, 52))  # Outfit
+    draw.text((70, 990), f"Style: {style}", fill=(255, 215, 100))
+    draw.text((70, 1040), f"Prompt: {prompt[:58]}", fill=(235, 235, 245))
+    draw.text((70, 1090), "Tip: Add Pollinations API key for live Flux character art", fill=(160, 215, 255))
+    return img
 
 
-def apply_image_preview_edits(img: Image.Image, cfg: dict) -> Image.Image:
+def apply_inshot_frame_edits(img: Image.Image) -> Image.Image:
     out = img.convert("RGB")
-    if cfg["rotation"]:
-        out = out.rotate(-cfg["rotation"], expand=True)
-    if cfg["flip_h"]:
+    if st.session_state.rotation:
+        out = out.rotate(-st.session_state.rotation, expand=True)
+    if st.session_state.flip_h:
         out = ImageOps.mirror(out)
-    if cfg["filter_mode"] == "Grayscale":
+
+    fname = st.session_state.filter_name
+    if fname == "Vivid":
+        out = ImageEnhance.Color(out).enhance(1.45)
+        out = ImageEnhance.Contrast(out).enhance(1.15)
+    elif fname == "Warm":
+        r, g, b = out.split()
+        r = r.point(lambda x: min(255, int(x * 1.12)))
+        b = b.point(lambda x: max(0, int(x * 0.90)))
+        out = Image.merge("RGB", (r, g, b))
+    elif fname == "Noir / B&W":
         out = ImageOps.grayscale(out).convert("RGB")
-    elif cfg["filter_mode"] == "High Contrast":
-        out = ImageOps.autocontrast(out)
-    elif cfg["filter_mode"] == "Invert":
-        out = ImageOps.invert(out)
-    if cfg["opacity"] < 1.0:
-        bg = Image.new("RGB", out.size, (15, 15, 20))
-        out = Image.blend(bg, out, cfg["opacity"])
+    elif fname == "Soft Glow":
+        blurred = out.filter(ImageFilter.GaussianBlur(radius=4))
+        out = Image.blend(out, blurred, 0.35)
+
+    if st.session_state.opacity < 1.0:
+        dark_bg = Image.new("RGB", out.size, (12, 12, 16))
+        out = Image.blend(dark_bg, out, st.session_state.opacity)
+
+    draw = ImageDraw.Draw(out)
+    w, h = out.size
+    if st.session_state.kannada_overlay.strip():
+        draw.rectangle([40, h - 220, w - 40, h - 110], fill=(15, 15, 22))
+        draw.text((70, h - 180), st.session_state.kannada_overlay.strip(), fill=(255, 220, 90))
+    if st.session_state.sticker_text.strip():
+        draw.text((w - 220, 70), st.session_state.sticker_text.strip(), fill=(255, 255, 255))
     return out
 
 
-st.title("🎬 Creator Hub All-in-One Studio (Kannada First)")
+def render_video_player_html(video_bytes: bytes, start_sec: float, speed: float):
+    b64_vid = base64.b64encode(video_bytes).decode("utf-8")
+    html = f"""
+    <div style="background:#111318;padding:12px;border-radius:10px;border:1px solid #2b303c;">
+      <video id="studioVid" controls style="width:100%;max-height:420px;border-radius:8px;background:#000;">
+        <source src="data:video/mp4;base64,{b64_vid}" type="video/mp4">
+      </video>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center;color:#cfd6e4;font-family:sans-serif;font-size:13px;">
+        <button onclick="const v=document.getElementById('studioVid');v.currentTime=Math.max(0,v.currentTime-5);">⏪ -5s</button>
+        <button onclick="const v=document.getElementById('studioVid');v.paused?v.play():v.pause();">⏯️ Play/Pause</button>
+        <button onclick="const v=document.getElementById('studioVid');v.currentTime=v.currentTime+5;">⏩ +5s</button>
+        <span>Speed: {speed}x | Jump Target: {start_sec:.1f}s</span>
+      </div>
+    </div>
+    <script>
+      const vid = document.getElementById('studioVid');
+      vid.addEventListener('loadedmetadata', () => {{
+        vid.playbackRate = {speed};
+        if ({start_sec} > 0 && {start_sec} < vid.duration) {{
+          vid.currentTime = {start_sec};
+        }}
+      }});
+    </script>
+    """
+    components.html(html, height=495)
+
 
 # ==============================================================================
-# TOP SECTION: MEDIA PLAYER VIEW (WINDOWS MEDIA PLAYER STYLE)
+# TOP: MEDIA PLAYER SCREEN (LIKE WINDOWS MEDIA PLAYER / VIDEO STUDIO MONITOR)
 # ==============================================================================
-st.markdown("### 📺 Studio Player & Main Preview Screen")
-p_left, p_right = st.columns([3, 1])
+st.markdown("## 🎬 Creator Hub Studio — Kannada Edition")
 
-with p_left:
-    if st.session_state.final_video:
-        st.video(st.session_state.final_video)
-        st.caption("🟢 Previewing: Rendered Video")
+pollinations_key = ""
+try:
+    pollinations_key = st.secrets.get("POLLINATIONS_API_KEY", "")
+except Exception:
+    pollinations_key = os.getenv("POLLINATIONS_API_KEY", "")
+
+with st.sidebar:
+    st.markdown("### 🔑 Optional AI Image API")
+    key_input = st.text_input("Pollinations API Key", value=pollinations_key, type="password")
+    if key_input:
+        pollinations_key = key_input
+
+screen_col, side_col = st.columns([3, 1])
+
+with screen_col:
+    if st.session_state.final_video_bytes:
+        render_video_player_html(
+            st.session_state.final_video_bytes,
+            st.session_state.jump_sec,
+            st.session_state.speed,
+        )
     elif st.session_state.pulled_video_path and os.path.exists(st.session_state.pulled_video_path):
-        st.video(st.session_state.pulled_video_path)
-        st.caption("📥 Previewing: Pulled Social Media Video")
-    elif st.session_state.generated_audio:
-        st.audio(st.session_state.generated_audio, format="audio/mp3")
-        st.caption("🎙️ Previewing: Kannada Voiceover Audio")
+        with open(st.session_state.pulled_video_path, "rb") as vf:
+            render_video_player_html(vf.read(), st.session_state.jump_sec, st.session_state.speed)
     elif st.session_state.scenes:
-        edited_preview = apply_image_preview_edits(st.session_state.scenes[-1], st.session_state.edit_settings)
-        st.image(edited_preview, use_container_width=True)
-        st.caption("🖼️ Previewing: Latest Scene Frame with Live Editor Adjustments")
+        preview_img = apply_inshot_frame_edits(st.session_state.scenes[-1])
+        st.image(preview_img, caption="Live Scene Monitor (Generate or upload MP4 to use interactive scrubber)", use_container_width=True)
     else:
-        st.info("🖥️ Screen Area: Paste a video link, drag & drop media, or generate Kannada voiceover & scenes below.")
+        st.markdown(
+            """
+            <div style="background:#111318;color:#d6dde8;height:280px;border-radius:10px;
+                        display:flex;flex-direction:column;align-items:center;justify-content:center;
+                        border:1px dashed #3b4254;">
+              <div style="font-size:36px;">🎞️</div>
+              <div style="font-size:16px;margin-top:8px;"><b>Studio Screen Ready</b></div>
+              <div style="font-size:13px;opacity:0.8;margin-top:4px;">
+                Create a character/scene, paste a video link, or upload a video below
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-with p_right:
-    st.markdown("#### ⚙️ Quick Player & Output")
-    st.session_state.edit_settings["aspect_ratio"] = st.selectbox(
-        "Aspect Ratio",
-        ["9:16 (Reels/Shorts)", "16:9 (YouTube)", "1:1 (Square/Collage)", "4:5 (Feed)"],
-    )
-    bg_music = st.file_uploader("Background Music (MP3/WAV)", type=["mp3", "wav"])
-    if bg_music:
-        st.audio(bg_music)
-        st.success("BGM ready for mix")
+    # Quick timeline marker jump buttons (just like chapter/cut markers below a player)
+    m1, m2, m3, m4 = st.columns(4)
+    if m1.button("📍 0s Hook"):
+        st.session_state.jump_sec = 0.0
+        st.rerun()
+    if m2.button("📍 5s Scene 1"):
+        st.session_state.jump_sec = 5.0
+        st.rerun()
+    if m3.button("📍 15s Mid Cut"):
+        st.session_state.jump_sec = 15.0
+        st.rerun()
+    if m4.button("📍 25s CTA"):
+        st.session_state.jump_sec = 25.0
+        st.rerun()
+
+with side_col:
+    st.markdown("#### 🎙️ Kannada Voice & Subtitles")
+    if st.session_state.generated_audio:
+        st.audio(st.session_state.generated_audio, format="audio/mp3")
     if st.session_state.kannada_script:
-        st.markdown("**ಕನ್ನಡ Subtitle Preview:**")
-        st.write(st.session_state.kannada_script)
+        st.info(st.session_state.kannada_script)
+    else:
+        st.caption("No Kannada script generated yet.")
 
 st.divider()
 
 # ==============================================================================
-# BOTTOM SECTION: ALL-IN-ONE WORKFLOWS & INSHOT-STYLE CONTROLS
+# BELOW SCREEN: INSHOT-STYLE QUICK TOOLBAR + WORKSPACE TABS
 # ==============================================================================
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🔗 1. Link Pull & Drag-Drop Media",
-    "📜 2. Script & Kannada Converter",
-    "🎙️ 3. Kannada Voice & Subtitles",
-    "🎨 4. Animation & Scene Studio",
-    "✂️ 5. Pro Editor & Collage (InShot Mode)",
-    "📥 6. Render & Export Vault",
+st.markdown("### 🎛️ InShot-Style Editing Bar")
+b1, b2, b3, b4, b5 = st.columns(5)
+if b1.button("✂️ Trim / Split"):
+    st.session_state.tool_group = "Trim & Cut"
+if b2.button("⚡ Speed / Ease"):
+    st.session_state.tool_group = "Speed & Motion"
+if b3.button("🎨 Filters / Rotate"):
+    st.session_state.tool_group = "Filters & Look"
+if b4.button("💬 Kannada / Sticker"):
+    st.session_state.tool_group = "Kannada & Sticker"
+if b5.button("🧩 Collage / Export"):
+    st.session_state.tool_group = "Collage & Export"
+
+group = st.session_state.tool_group
+if group == "Trim & Cut":
+    c1, c2, c3 = st.columns(3)
+    st.session_state.trim_start = c1.number_input("Pre-Cut Start (s)", 0.0, 120.0, float(st.session_state.trim_start), 0.5)
+    st.session_state.split_point = c2.number_input("Split Point (s)", 0.0, 120.0, float(st.session_state.split_point), 0.5)
+    st.session_state.trim_end = c3.number_input("Trim End (s)", 1.0, 180.0, float(st.session_state.trim_end), 0.5)
+elif group == "Speed & Motion":
+    c1, c2, c3 = st.columns(3)
+    st.session_state.speed = c1.select_slider("Playback / Clip Speed", [0.5, 0.75, 1.0, 1.25, 1.5, 2.0], value=st.session_state.speed)
+    st.session_state.transition = c2.selectbox("Transition", ["Crossfade", "Slide", "Zoom", "Cut"])
+    st.session_state.easing = c3.selectbox("Ease Curve", ["Linear", "Ease-In", "Ease-Out", "Ease-In-Out"])
+elif group == "Filters & Look":
+    c1, c2, c3, c4 = st.columns(4)
+    st.session_state.filter_name = c1.selectbox("Filter", ["Original", "Vivid", "Warm", "Noir / B&W", "Soft Glow"])
+    st.session_state.rotation = c2.selectbox("Rotate (°)", [0, 90, 180, 270])
+    st.session_state.opacity = c3.slider("Opacity", 0.1, 1.0, float(st.session_state.opacity), 0.05)
+    st.session_state.flip_h = c4.checkbox("Mirror Flip", value=st.session_state.flip_h)
+elif group == "Kannada & Sticker":
+    c1, c2 = st.columns(2)
+    st.session_state.kannada_overlay = c1.text_input("ಕನ್ನಡ Subtitle / Caption Line", value=st.session_state.kannada_overlay)
+    st.session_state.sticker_text = c2.text_input("Stickers / Emojis", value=st.session_state.sticker_text)
+else:
+    c1, c2 = st.columns(2)
+    st.session_state.collage_mode = c1.selectbox("Collage Layout", ["Single View", "Side-by-Side (2)", "Grid (4)"])
+    st.session_state.bg_remove = c2.checkbox("Clean Background / Cutout Mode", value=st.session_state.bg_remove)
+
+st.divider()
+
+# ==============================================================================
+# WORKFLOW TABS (CREATE CHARACTERS, PULL LINK, DRAG & DROP, KANNADA TTS)
+# ==============================================================================
+t1, t2, t3, t4 = st.tabs([
+    "🎭 AI Character & Animations",
+    "📜 Kannada Script & Voice (TTS)",
+    "🔗 Direct Link Pull & Upload",
+    "📥 Exports (Script, SRT, MP3)",
 ])
 
-# --- TAB 1: DIRECT LINK PULL (NO SEARCH) + DRAG & DROP UPLOAD ---
-with tab1:
-    st.subheader("Pull Video from Link (YouTube / Instagram / Facebook / Reels)")
-    st.caption("Paste a direct public link—no search bar. Use only content you own or have rights to adapt.")
-    link_url = st.text_input("Paste Direct Video / Reel URL", placeholder="https://www.instagram.com/reel/... or https://youtu.be/...")
-
-    col_l1, col_l2 = st.columns([1, 3])
-    with col_l1:
-        pull_btn = st.button("⬇️ Fetch from Link", type="primary")
-    with col_l2:
-        if not HAS_YTDLP:
-            st.warning("Install `yt-dlp` in `requirements.txt` to enable direct link fetching.")
-
-    if pull_btn and link_url.strip():
-        if not HAS_YTDLP:
-            st.error("`yt-dlp` is not installed.")
-        else:
-            with st.spinner("Fetching video from link..."):
-                try:
-                    tmp_dir = tempfile.mkdtemp(prefix="kkm_pull_")
-                    vid_path, vid_title = pull_video_from_link(link_url.strip(), tmp_dir)
-                    st.session_state.pulled_video_path = vid_path
-                    st.success(f"Fetched: {vid_title}")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Could not pull link (platforms may block cloud IPs, require login cookies, or restrict access): {e}")
-
-    st.divider()
-    st.subheader("Drag & Drop Your Images & Videos (Any Source Language)")
-    dropped_files = st.file_uploader(
-        "Drag and drop or browse images and videos",
-        type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "mkv", "webm"],
-        accept_multiple_files=True,
-    )
-    if dropped_files:
-        st.session_state.uploaded_media = dropped_files
-        st.success(f"{len(dropped_files)} file(s) loaded into workspace.")
-        for f in dropped_files:
-            if f.type.startswith("image/"):
-                img = Image.open(f)
-                if st.button(f"➕ Add '{f.name}' to Scenes", key=f"add_{f.name}"):
-                    st.session_state.scenes.append(img)
-                    st.toast(f"Added {f.name} to Scene Studio")
-            elif f.type.startswith("video/"):
-                if st.button(f"📺 Load '{f.name}' into Top Player", key=f"play_{f.name}"):
-                    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(f.name)[1] or ".mp4")
-                    tfile.write(f.getvalue())
-                    tfile.flush()
-                    st.session_state.final_video = tfile.name
-                    st.rerun()
-
-# --- TAB 2: SCRIPT WRITING (30s VIRAL REEL + KWISDOM STORY + KANNADA MAIN) ---
-with tab2:
-    st.subheader("Script Writing & Kannada Adaptation")
-    mode = st.selectbox(
-        "Format",
-        [
-            "30-Second Second Income / Viral Reel",
-            "Kwisdom Moral & Wisdom Story",
-            "Translate / Adapt Foreign Script into Kannada",
-        ],
-    )
-    c1, c2 = st.columns(2)
-    with c1:
-        topic = st.text_input("Topic / Idea (English or Kannada)", "3 smart side-income habits in 30 seconds")
-        hook_style = st.selectbox("Opening Hook", ["Curiosity Gap", "Myth Buster", "Step-by-Step Formula", "Story Lesson"])
-    with c2:
-        pacing = st.selectbox("Pacing", ["Fast 30s Reel", "Calm Storyteller", "Energetic Creator"])
-        auto_kannada_sample = st.text_area(
-            "Kannada Script (Main Output — Edit freely in Kannada)",
-            value=st.session_state.kannada_script,
-            height=160,
-            placeholder="ಇಲ್ಲಿ ನಿಮ್ಮ ಕನ್ನಡ ಸ್ಕ್ರಿಪ್ಟ್ ಬರೆಯಿರಿ ಅಥವಾ ರಚಿಸಿ...",
+with t1:
+    st.subheader("Create Character & Animated Scenes from Short Prompts")
+    p1, p2 = st.columns([2, 1])
+    with p1:
+        char_prompt = st.text_input(
+            "Short Character / Scene Prompt",
+            "young Kannada entrepreneur explaining smart savings with friendly smile",
         )
+    with p2:
+        char_style = st.selectbox("Character Style", ["3D Pixar Style", "Anime Story", "Flat Vector", "Comic Ink"])
 
-    if st.button("✨ Generate Drafts"):
-        st.session_state.source_script_en = (
-            f"[{mode} | {hook_style} | {pacing}]\n"
-            f"Hook (0-3s): Stop scrolling! Here is how {topic} works.\n"
-            f"Core (3-25s): Focus on clear value, consistency, and practical steps.\n"
-            f"CTA (25-30s): Save this reel and follow for more in Kannada."
-        )
-        st.session_state.kannada_script = (
-            f"ಗಮನಿಸಿ! '{topic}' ಬಗ್ಗೆ ನೀವು ತಿಳಿಯಲೇಬೇಕಾದ ಮುಖ್ಯ ವಿಷಯ ಇಲ್ಲಿದೆ. "
-            f"ಮೊದಲನೆಯದಾಗಿ ಸರಿಯಾದ ಯೋಜನೆ ಮತ್ತು ನಿರಂತರ ಪ್ರಯತ್ನ ಬಹಳ ಮುಖ್ಯ. "
-            f"ಸಣ್ಣ ಹೆಜ್ಜೆಗಳಿಂದ ದೊಡ್ಡ ಬದಲಾವಣೆ ಸಾಧ್ಯ. ಹೆಚ್ಚಿನ ಕನ್ನಡ ವಿಡಿಯೋಗಳಿಗಾಗಿ ಫಾಲೋ ಮಾಡಿ!"
-        )
-        st.rerun()
-    elif auto_kannada_sample != st.session_state.kannada_script:
-        st.session_state.kannada_script = auto_kannada_sample
-
-    if st.session_state.source_script_en:
-        st.text_area("Reference / Foreign Script Notes", value=st.session_state.source_script_en, height=110)
-
-# --- TAB 3: KANNADA VOICEOVER & SUBTITLES ---
-with tab3:
-    st.subheader("Kannada Voiceover (`edge-tts`) & Subtitles (`.srt`)")
-    kn_text = st.text_area(
-        "Kannada Narration Text",
-        value=st.session_state.kannada_script or "ನಮಸ್ಕಾರ! ಕ್ರಿಯೇಟರ್ ಹಬ್ ಸ್ಟುಡಿಯೋಗೆ ಸ್ವಾಗತ.",
-        height=140,
-    )
-    v_col1, v_col2, v_col3 = st.columns(3)
-    with v_col1:
-        kn_voice = st.selectbox("Kannada Neural Voice", ["kn-IN-SapnaNeural", "kn-IN-GaganNeural"])
-    with v_col2:
-        rate_pct = st.slider("Speaking Speed (%)", -50, 50, 0)
-    with v_col3:
-        pitch_hz = st.slider("Pitch (Hz)", -30, 30, 0)
-
-    if st.button("🎙️ Generate Kannada Voice & Subtitles", type="primary"):
-        if not HAS_EDGE_TTS:
-            st.error("Install `edge-tts` in `requirements.txt` to synthesize Kannada speech.")
-        elif not kn_text.strip():
-            st.warning("Enter Kannada text first.")
-        else:
-            with st.spinner("Generating Kannada audio and subtitle timings..."):
-                try:
-                    rate_str = f"{rate_pct:+d}%"
-                    pitch_str = f"{pitch_hz:+d}Hz"
-                    audio_bytes, srt_out = run_async(
-                        generate_kannada_tts_and_srt(kn_text.strip(), kn_voice, rate_str, pitch_str)
-                    )
-                    st.session_state.generated_audio = audio_bytes
-                    st.session_state.subtitles_srt = srt_out
-                    st.session_state.kannada_script = kn_text.strip()
-                    st.success("Kannada voiceover and subtitles generated! Play audio on the top screen.")
-                except Exception as e:
-                    st.error(f"TTS generation error: {e}")
-
-    if st.session_state.generated_audio:
-        st.audio(st.session_state.generated_audio, format="audio/mp3")
-    if st.session_state.subtitles_srt:
-        st.text_area("Generated Kannada Subtitles (SRT)", value=st.session_state.subtitles_srt, height=160)
-
-# --- TAB 4: ANIMATION & SCENE STUDIO ---
-with tab4:
-    st.subheader("Animation & Scene Builder")
-    sc_col1, sc_col2 = st.columns(2)
-    with sc_col1:
-        scene_desc = st.text_input("Scene Description", "Warm golden sunrise over hills, clean modern motion graphic")
-        anim_style = st.selectbox(
-            "Animation Motion Preset",
-            ["Ken Burns Zoom-In", "Ken Burns Pan-Right", "Slide Up", "Bounce Pop", "Parallax Drift", "Fade Pulse"],
-        )
-    with sc_col2:
-        palette = st.selectbox("Color Theme", ["Deep Indigo & Gold", "Emerald & Cream", "Crimson & Charcoal", "Ocean Teal"])
-        caption_overlay = st.text_input("On-Screen Kannada Title", "ಕನ್ನಡ ಕಂಟೆಂಟ್ ಸ್ಟುಡಿಯೋ")
-
-    if st.button("🎨 Create Scene Frame"):
-        palettes = {
-            "Deep Indigo & Gold": ((22, 27, 64), (255, 204, 77)),
-            "Emerald & Cream": ((16, 66, 52), (250, 244, 225)),
-            "Crimson & Charcoal": ((30, 30, 36), (255, 92, 92)),
-            "Ocean Teal": ((12, 56, 78), (120, 235, 220)),
-        }
-        bg_c, fg_c = palettes[palette]
-        frame = Image.new("RGB", (1080, 1920), color=bg_c)
-        draw = ImageDraw.Draw(frame)
-        draw.rectangle([70, 220, 1010, 1700], outline=fg_c, width=6)
-        draw.text((120, 320), f"Motion: {anim_style}", fill=fg_c)
-        draw.text((120, 400), f"Prompt: {scene_desc[:60]}", fill=(240, 240, 240))
-        draw.text((120, 500), f"Title: {caption_overlay}", fill=fg_c)
-        st.session_state.scenes.append(frame)
-        st.success(f"Scene #{len(st.session_state.scenes)} added!")
+    if st.button("✨ Generate Character Scene", type="primary"):
+        with st.spinner("Creating character scene..."):
+            scene_img = generate_ai_character_image(char_prompt, char_style, pollinations_key)
+            st.session_state.scenes.append(scene_img)
+            st.session_state.scene_captions.append(char_prompt)
+            st.success("Character scene added to top monitor!")
+            st.rerun()
 
     if st.session_state.scenes:
-        st.markdown("#### Scene Frames")
         cols = st.columns(min(4, len(st.session_state.scenes)))
-        for i, sc in enumerate(st.session_state.scenes[-4:]):
-            with cols[i]:
-                st.image(sc, caption=f"Frame {i + 1}", use_container_width=True)
+        for idx, sc in enumerate(st.session_state.scenes[-4:]):
+            with cols[idx]:
+                st.image(sc, caption=f"Scene {idx + 1}", use_container_width=True)
 
-# --- TAB 5: INSHOT-STYLE FULL TOOLSET & COLLAGE ---
-with tab5:
-    st.subheader("InShot-Style Editing Controls & Collage Maker (Unlimited Mode)")
-    cfg = st.session_state.edit_settings
-
-    e1, e2, e3, e4 = st.columns(4)
-    with e1:
-        cfg["speed"] = st.slider("Speed", 0.25, 4.0, float(cfg["speed"]), 0.25)
-        cfg["opacity"] = st.slider("Opacity", 0.05, 1.0, float(cfg["opacity"]), 0.05)
-        cfg["rotation"] = st.selectbox("Rotate", [0, 90, 180, 270], index=[0, 90, 180, 270].index(cfg["rotation"]))
-        cfg["flip_h"] = st.checkbox("Mirror / Flip", value=cfg["flip_h"])
-    with e2:
-        cfg["filter_mode"] = st.selectbox("Filter", ["None", "Grayscale", "High Contrast", "Invert"])
-        cfg["transition"] = st.selectbox("Transition", ["Cross Dissolve", "Slide Left", "Zoom Cut", "Wipe", "None"])
-        cfg["easing"] = st.selectbox("Ease Curve", ["Linear", "Ease-In", "Ease-Out", "Ease-In-Out"])
-        cfg["reversed"] = st.checkbox("Reverse Clip", value=cfg["reversed"])
-    with e3:
-        cfg["pip_enabled"] = st.checkbox("PiP (Picture-in-Picture)", value=cfg["pip_enabled"])
-        cfg["bg_remove_mode"] = st.selectbox("AI Cut / BG Remove", ["Off", "Auto Cutout", "Chroma Key"])
-        cfg["mask_shape"] = st.selectbox("Mask", ["None", "Circle", "Rectangle", "Heart/Star"])
-        cfg["freeze_sec"] = st.number_input("Freeze Frame (sec)", min_value=0.0, max_value=10.0, value=float(cfg["freeze_sec"]), step=0.5)
-    with e4:
-        cfg["collage_layout"] = st.selectbox("Collage Grid", ["Single", "2-Split Vertical", "2-Split Horizontal", "4-Grid"])
-        cfg["voice_enhance"] = st.checkbox("Voice Enhance & Noise Clean", value=cfg["voice_enhance"])
-        st.text_input("Sticker / Emoji Pack", "🔥✨💡🎯")
-        st.text_input("Trim / Split / Pre-Cut Range", "00:00 - 00:30")
-
-    if st.button("📸 Capture Frame / Apply Edits to Top Screen"):
-        if st.session_state.scenes:
-            edited = apply_image_preview_edits(st.session_state.scenes[-1], cfg)
-            st.session_state.scenes.append(edited)
-        st.success("Editing parameters updated and previewed on the top screen.")
+with t2:
+    st.subheader("30s Second-Income Reel / Story Script & Kannada Voiceover")
+    idea = st.text_input("Topic (30-Second Reel / Wisdom Story)", "3 second-income habits in 30 seconds")
+    if st.button("📝 Generate Kannada Script"):
+        st.session_state.kannada_script = (
+            f"ಕೇವಲ 30 ಸೆಕೆಂಡ್‌ಗಳಲ್ಲಿ '{idea}' ಬಗ್ಗೆ ಮುಖ್ಯ ಮಾಹಿತಿ! "
+            f"ಮೊದಲನೆಯದಾಗಿ ನಿಮ್ಮ ಕೌಶಲ್ಯವನ್ನು ಗುರುತಿಸಿ, ಎರಡನೆಯದಾಗಿ ಸಣ್ಣ ಪ್ರಮಾಣದಲ್ಲಿ ಆರಂಭಿಸಿ, "
+            f"ಮೂರನೆಯದಾಗಿ ಪ್ರತಿದಿನ ಮುಂದುವರಿಸಿ. ಕನ್ನಡ ಕಂಟೆಂಟ್‌ಗಾಗಿ ಸಬ್‌ಸ್ಕ್ರೈಬ್ ಮಾಡಿ!"
+        )
         st.rerun()
 
-# --- TAB 6: RENDER & EXPORT VAULT ---
-with tab6:
-    st.subheader("Final Render & Download Vault")
-    r_col1, r_col2 = st.columns(2)
-    with r_col1:
-        st.session_state.edit_settings["fps"] = st.select_slider("Render FPS", options=[24, 30, 60], value=st.session_state.edit_settings["fps"])
-        if st.button("🚀 Build Project Package", type="primary"):
-            with st.spinner("Preparing project timeline..."):
-                time.sleep(0.5)
-                st.success("Project assets, Kannada script, audio, and SRT subtitles are ready below.")
+    st.session_state.kannada_script = st.text_area(
+        "ಕನ್ನಡ ಸ್ಕ್ರಿಪ್ಟ್ (Edit Kannada Script)",
+        value=st.session_state.kannada_script,
+        height=130,
+    )
 
-    with r_col2:
-        if st.session_state.kannada_script:
-            st.download_button(
-                "⬇️ Download Kannada Script (.txt)",
-                data=st.session_state.kannada_script.encode("utf-8"),
-                file_name="kannada_script.txt",
-                mime="text/plain",
-            )
-        if st.session_state.subtitles_srt:
-            st.download_button(
-                "⬇️ Download Kannada Subtitles (.srt)",
-                data=st.session_state.subtitles_srt.encode("utf-8"),
-                file_name="kannada_subtitles.srt",
-                mime="application/x-subrip",
-            )
-        if st.session_state.generated_audio:
-            st.download_button(
-                "⬇️ Download Kannada Voiceover (.mp3)",
-                data=st.session_state.generated_audio,
-                file_name="kannada_voiceover.mp3",
-                mime="audio/mpeg",
-            )
+    v1, v2 = st.columns(2)
+    kn_voice = v1.selectbox("Kannada Voice", ["kn-IN-SapnaNeural", "kn-IN-GaganNeural"])
+    kn_rate = v2.slider("Speed (%)", -40, 40, 0)
+
+    if st.button("🎙️ Generate Kannada Voice & SRT Subtitles"):
+        if not HAS_EDGE_TTS:
+            st.error("Add `edge-tts` to `requirements.txt`.")
+        else:
+            with st.spinner("Generating Kannada voiceover & subtitles..."):
+                audio_data, srt_data = run_async(
+                    generate_kannada_tts_and_srt(
+                        st.session_state.kannada_script,
+                        kn_voice,
+                        f"{kn_rate:+d}%",
+                        "+0Hz",
+                    )
+                )
+                st.session_state.generated_audio = audio_data
+                st.session_state.subtitles_srt = srt_data
+                st.success("Kannada voiceover & subtitles ready!")
+                st.rerun()
+
+with t3:
+    st.subheader("Pull from Direct Link (No Search) or Drag & Drop Media")
+    url_in = st.text_input("Direct Video Link (YouTube / Instagram / Facebook)")
+    if st.button("⬇️ Pull Video from Link"):
+        if not HAS_YTDLP:
+            st.error("Add `yt-dlp` to `requirements.txt`.")
+        elif url_in.strip():
+            with st.spinner("Downloading video from link..."):
+                try:
+                    tmp_d = tempfile.mkdtemp(prefix="kkm_dl_")
+                    opts = {
+                        "outtmpl": os.path.join(tmp_d, "%(title).50s.%(ext)s"),
+                        "format": "best[ext=mp4]/best",
+                        "noplaylist": True,
+                        "quiet": True,
+                    }
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(url_in.strip(), download=True)
+                        p = ydl.prepare_filename(info)
+                    st.session_state.pulled_video_path = p
+                    st.success("Video loaded into top player!")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Link pull failed: {exc}")
+
+    uploads = st.file_uploader(
+        "Drag & drop your images or MP4 videos",
+        type=["png", "jpg", "jpeg", "webp", "mp4", "mov"],
+        accept_multiple_files=True,
+    )
+    if uploads:
+        for f in uploads:
+            if f.type.startswith("image/"):
+                st.session_state.scenes.append(Image.open(f).convert("RGB"))
+            elif f.type.startswith("video/"):
+                st.session_state.final_video_bytes = f.getvalue()
+        st.success(f"Loaded {len(uploads)} file(s).")
+        st.rerun()
+
+with t4:
+    st.subheader("Download Kannada Script, Subtitles & Voiceover")
+    d1, d2, d3 = st.columns(3)
+    if st.session_state.kannada_script:
+        d1.download_button(
+            "⬇️ Kannada Script (.txt)",
+            data=st.session_state.kannada_script.encode("utf-8"),
+            file_name="kannada_script.txt",
+        )
+    if st.session_state.subtitles_srt:
+        d2.download_button(
+            "⬇️ Kannada Subtitles (.srt)",
+            data=st.session_state.subtitles_srt.encode("utf-8"),
+            file_name="kannada_subtitles.srt",
+        )
+    if st.session_state.generated_audio:
+        d3.download_button(
+            "⬇️ Kannada Voice (.mp3)",
+            data=st.session_state.generated_audio,
+            file_name="kannada_voice.mp3",
+            mime="audio/mpeg",
+        )
