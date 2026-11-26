@@ -4,18 +4,10 @@ import io
 import os
 import subprocess
 import tempfile
-import urllib.parse
 import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 import requests
-
-try:
-    from google import genai
-    from google.genai import types
-    HAS_GENAI = True
-except ImportError:
-    HAS_GENAI = False
 
 try:
     import edge_tts
@@ -42,7 +34,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- ENGLISH-ONLY DARK STUDIO THEME ---
 st.markdown(
     """
     <style>
@@ -56,16 +47,6 @@ st.markdown(
         border-radius: 14px;
         padding: 14px;
         box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
-      }
-      .studio-badge {
-        display: inline-block;
-        padding: 3px 10px;
-        border-radius: 999px;
-        font-size: 12px;
-        background: #1b2538;
-        color: #7cc4ff;
-        border: 1px solid #2d3e5e;
-        margin-right: 6px;
       }
       .kn-box {
         background: #121722;
@@ -127,7 +108,6 @@ def run_async(coro):
 
 
 def translate_text_free(text: str, source_lang: str, target_lang: str) -> str:
-    """Translates between English ('en') and Kannada ('kn') via MyMemory with safe fallback."""
     clean = (text or "").strip()
     if not clean:
         return ""
@@ -166,7 +146,6 @@ def load_kannada_font(size: int = 32):
 
 
 async def generate_kannada_tts_and_kn_srt(kn_text: str, voice: str, rate: str, pitch: str):
-    """Generates Kannada-only MP3 voiceover and Kannada-only SRT subtitles."""
     audio_buf = io.BytesIO()
     srt_lines = []
     idx = 1
@@ -195,81 +174,6 @@ async def generate_kannada_tts_and_kn_srt(kn_text: str, voice: str, rate: str, p
     return audio_buf.getvalue(), srt_str
 
 
-def generate_ai_scene_image(
-    prompt: str,
-    style: str,
-    gemini_api_key: str = "",
-    pollinations_api_key: str = "",
-    ref_image: Image.Image | None = None,
-    aspect_ratio: str = "16:9",
-) -> tuple[Image.Image | None, str]:
-    """Generates AI character/story scenes via Gemini (Nano Banana) or Pollinations."""
-    full_prompt = (
-        f"{style} cinematic story illustration, expressive detailed character, "
-        f"rich environment lighting, depth of field, no stick figures, {prompt}"
-    ).strip()
-
-    if gemini_api_key.strip():
-        if not HAS_GENAI:
-            return None, "Install `google-genai` in requirements.txt to use Gemini / Nano Banana image generation."
-        try:
-            client = genai.Client(api_key=gemini_api_key.strip())
-            contents = [full_prompt]
-            if ref_image is not None:
-                buf = io.BytesIO()
-                ref_image.convert("RGB").save(buf, format="PNG")
-                contents.append(
-                    types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png")
-                )
-                contents.append(
-                    "Keep the same main character appearance and visual style from the reference image while adapting to the new scene prompt."
-                )
-
-            last_err = ""
-            for model_name in ("gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"):
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            response_modalities=["IMAGE"],
-                            image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
-                        ),
-                    )
-                    candidates = getattr(response, "candidates", None) or []
-                    for cand in candidates:
-                        content = getattr(cand, "content", None)
-                        for part in getattr(content, "parts", None) or []:
-                            inline = getattr(part, "inline_data", None)
-                            if inline and getattr(inline, "data", None):
-                                img = Image.open(io.BytesIO(inline.data)).convert("RGB")
-                                return img, f"Generated with {model_name}"
-                except Exception as model_exc:
-                    last_err = str(model_exc)
-                    continue
-            detail = f" ({last_err})" if last_err else ""
-            return None, f"Gemini image generation did not return image bytes{detail}. Check model access or billing/quota in Google AI Studio."
-        except Exception as exc:
-            return None, f"Gemini API error: {exc}"
-
-    if pollinations_api_key.strip():
-        try:
-            w, h = (768, 1280) if aspect_ratio == "9:16" else (1280, 720)
-            encoded = urllib.parse.quote(full_prompt)
-            url = (
-                f"https://gen.pollinations.ai/image/{encoded}"
-                f"?model=flux&width={w}&height={h}&key={urllib.parse.quote(pollinations_api_key.strip())}"
-            )
-            resp = requests.get(url, timeout=30)
-            if resp.status_code == 200 and resp.content:
-                return Image.open(io.BytesIO(resp.content)).convert("RGB"), "Generated with Pollinations Flux"
-            return None, f"Pollinations returned status {resp.status_code}."
-        except Exception as exc:
-            return None, f"Pollinations error: {exc}"
-
-    return None, "Add a Gemini API Key (from Google AI Studio) in the sidebar or Streamlit Secrets to generate real AI characters and scenes."
-
-
 def build_motion_frames(base_img: Image.Image, motion_preset: str, num_frames: int = 8) -> list[Image.Image]:
     w, h = base_img.size
     frames = []
@@ -296,7 +200,6 @@ def build_motion_frames(base_img: Image.Image, motion_preset: str, num_frames: i
 
 
 def apply_inshot_frame_edits(img: Image.Image) -> Image.Image:
-    """Applies editing controls and renders Kannada-only subtitles at the bottom."""
     out = img.convert("RGB")
     if st.session_state.rotation:
         out = out.rotate(-st.session_state.rotation, expand=True)
@@ -401,32 +304,6 @@ def render_video_player_html(video_bytes: bytes, start_sec: float, speed: float)
 # TOP: STUDIO PLAYER SCREEN (100% ENGLISH INTERFACE)
 # ==============================================================================
 st.markdown("## 🎬 Creator Hub Studio")
-st.markdown(
-    '<span class="studio-badge">English UI</span>'
-    '<span class="studio-badge">Kannada Voice & Subtitles Only</span>'
-    '<span class="studio-badge">Gemini / Nano Banana Scenes</span>',
-    unsafe_allow_html=True,
-)
-
-gemini_key = ""
-pollinations_key = ""
-try:
-    gemini_key = st.secrets.get("GEMINI_API_KEY", "")
-except Exception:
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
-try:
-    pollinations_key = st.secrets.get("POLLINATIONS_API_KEY", "")
-except Exception:
-    pollinations_key = os.getenv("POLLINATIONS_API_KEY", "")
-
-with st.sidebar:
-    st.markdown("### AI Image API Keys")
-    g_in = st.text_input("Gemini API Key (Nano Banana)", value=gemini_key, type="password")
-    p_in = st.text_input("Pollinations API Key (Optional)", value=pollinations_key, type="password")
-    if g_in:
-        gemini_key = g_in
-    if p_in:
-        pollinations_key = p_in
 
 screen_col, side_col = st.columns([3.1, 1.1])
 
@@ -453,7 +330,7 @@ with screen_col:
               <div style="font-size:38px;">🎞️</div>
               <div style="font-size:17px;margin-top:8px;"><b>Monitor Ready</b></div>
               <div style="font-size:13px;opacity:0.85;margin-top:4px;">
-                Generate a story scene, pull a video link, or upload media below
+                Upload your images/videos or pull a video link below to start editing
               </div>
             </div>
             """,
@@ -487,7 +364,7 @@ with side_col:
 st.divider()
 
 # ==============================================================================
-# INSHOT-STYLE EDITING DOCK (ENGLISH CONTROLS, KANNADA SUBTITLES)
+# EDITING DOCK (ENGLISH CONTROLS, KANNADA SUBTITLES)
 # ==============================================================================
 st.markdown("### Editing Controls")
 b1, b2, b3, b4, b5 = st.columns(5)
@@ -534,46 +411,49 @@ st.divider()
 # WORKFLOW TABS (100% ENGLISH UI)
 # ==============================================================================
 t1, t2, t3, t4 = st.tabs([
-    "🎭 Character & Scenes",
+    "📁 Media & Link Pull",
     "📜 Script & Kannada Voice",
-    "🔗 Link Pull & Media Upload",
+    "🖼️ Uploaded Scenes",
     "📥 Render & Export",
 ])
 
 with t1:
-    st.subheader("Character & Story Scene Generator")
-    p1, p2, p3 = st.columns([3, 1, 1])
-    scene_prompt = p1.text_input(
-        "Scene & Character Description",
-        "Expressive 3D story character in a warm evening village market with glowing lanterns",
+    st.subheader("Pull Video from Link or Upload Your Images & Videos")
+    url_in = st.text_input("Direct Video Link (YouTube / Instagram / Facebook)")
+    if st.button("⬇️ Pull Video from Link"):
+        if not HAS_YTDLP:
+            st.error("Add `yt-dlp` to `requirements.txt`.")
+        elif url_in.strip():
+            with st.spinner("Fetching video..."):
+                try:
+                    tmp_d = tempfile.mkdtemp(prefix="kkm_dl_")
+                    opts = {
+                        "outtmpl": os.path.join(tmp_d, "%(title).50s.%(ext)s"),
+                        "format": "best[ext=mp4]/best",
+                        "noplaylist": True,
+                        "quiet": True,
+                    }
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(url_in.strip(), download=True)
+                        p = ydl.prepare_filename(info)
+                    st.session_state.pulled_video_path = p
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Link pull failed: {exc}")
+
+    uploads = st.file_uploader(
+        "Drag & Drop Your Images or Videos",
+        type=["png", "jpg", "jpeg", "webp", "mp4", "mov"],
+        accept_multiple_files=True,
     )
-    scene_style = p2.selectbox("Visual Style", ["3D Story", "Illustrated Story", "Magical Fantasy", "Comic Ink"])
-    scene_ratio = p3.selectbox("Aspect Ratio", ["16:9", "9:16", "1:1"])
-
-    m1, m2 = st.columns([1, 2])
-    motion_preset = m1.selectbox("Motion Effect", ["Ken Burns Zoom-In", "Ken Burns Pan-Right", "Parallax Drift", "Static"])
-    keep_ref = m2.checkbox("Use previous scene as character reference", value=True)
-
-    if st.button("✨ Generate Scene", type="primary"):
-        with st.spinner("Generating AI scene..."):
-            ref_img = st.session_state.scenes[-1] if (keep_ref and st.session_state.scenes) else None
-            img_scene, status_msg = generate_ai_scene_image(
-                scene_prompt, scene_style, gemini_key, pollinations_key, ref_img, scene_ratio
-            )
-            if img_scene is not None:
-                st.session_state.scenes.append(img_scene)
-                st.session_state.scene_labels.append(f"{scene_prompt[:32]} ({motion_preset})")
-                st.success(status_msg)
-                st.rerun()
-            else:
-                st.warning(status_msg)
-
-    if st.session_state.scenes:
-        cols = st.columns(min(4, len(st.session_state.scenes)))
-        for idx, sc in enumerate(st.session_state.scenes[-4:]):
-            lbl = st.session_state.scene_labels[-4:][idx]
-            with cols[idx]:
-                st.image(sc, caption=f"Scene {idx + 1}: {lbl}", use_container_width=True)
+    if uploads:
+        for f in uploads:
+            if f.type.startswith("image/"):
+                st.session_state.scenes.append(Image.open(f).convert("RGB"))
+                st.session_state.scene_labels.append(f.name)
+            elif f.type.startswith("video/"):
+                st.session_state.final_video_bytes = f.getvalue()
+        st.rerun()
 
 with t2:
     st.subheader("Two-Way Script Sync (English ↔ Kannada) & Kannada Voiceover")
@@ -630,42 +510,15 @@ with t2:
                 st.rerun()
 
 with t3:
-    st.subheader("Pull Video from Link or Upload Media")
-    url_in = st.text_input("Direct Video Link (YouTube / Instagram / Facebook)")
-    if st.button("⬇️ Pull Video from Link"):
-        if not HAS_YTDLP:
-            st.error("Add `yt-dlp` to `requirements.txt`.")
-        elif url_in.strip():
-            with st.spinner("Fetching video..."):
-                try:
-                    tmp_d = tempfile.mkdtemp(prefix="kkm_dl_")
-                    opts = {
-                        "outtmpl": os.path.join(tmp_d, "%(title).50s.%(ext)s"),
-                        "format": "best[ext=mp4]/best",
-                        "noplaylist": True,
-                        "quiet": True,
-                    }
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(url_in.strip(), download=True)
-                        p = ydl.prepare_filename(info)
-                    st.session_state.pulled_video_path = p
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Link pull failed: {exc}")
-
-    uploads = st.file_uploader(
-        "Drag & Drop Images or Videos",
-        type=["png", "jpg", "jpeg", "webp", "mp4", "mov"],
-        accept_multiple_files=True,
-    )
-    if uploads:
-        for f in uploads:
-            if f.type.startswith("image/"):
-                st.session_state.scenes.append(Image.open(f).convert("RGB"))
-                st.session_state.scene_labels.append(f.name)
-            elif f.type.startswith("video/"):
-                st.session_state.final_video_bytes = f.getvalue()
-        st.rerun()
+    st.subheader("Uploaded Image Scenes")
+    if st.session_state.scenes:
+        cols = st.columns(min(4, len(st.session_state.scenes)))
+        for idx, sc in enumerate(st.session_state.scenes[-4:]):
+            lbl = st.session_state.scene_labels[-4:][idx]
+            with cols[idx]:
+                st.image(sc, caption=f"Scene {idx + 1}: {lbl}", use_container_width=True)
+    else:
+        st.info("Upload images under 'Media & Link Pull' to preview and arrange scenes here.")
 
 with t4:
     st.subheader("Render Video & Download Assets")
@@ -677,7 +530,7 @@ with t4:
                 st.success("MP4 video rendered!")
                 st.rerun()
             else:
-                st.info("Add at least one scene and ensure `imageio` and `imageio-ffmpeg` are in `requirements.txt`.")
+                st.info("Upload at least one image scene and ensure `imageio` and `imageio-ffmpeg` are in `requirements.txt`.")
 
     d1, d2, d3, d4 = st.columns(4)
     if st.session_state.script_kn:
