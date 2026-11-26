@@ -113,7 +113,7 @@ defaults = {
     "transition": "Crossfade",
     "easing": "Ease-In-Out",
     "sticker_text": "✨🎬",
-    "subtitle_line": "ಕನ್ನಡ ಕಥೆ · Story Scene",
+    "subtitle_line": "ಕನ್ನಡ ಕಥೆ",
     "collage_mode": "Single View",
     "bg_remove": False,
 }
@@ -156,34 +156,77 @@ def translate_text_free(text: str, source_lang: str, target_lang: str) -> str:
     return clean
 
 
-def find_font_path(prefer_kannada: bool = True) -> str | None:
-    kn_candidates = [
+@st.cache_resource(show_spinner=False)
+def ensure_kannada_font_file() -> str | None:
+    """Finds an installed Kannada font or downloads NotoSansKannada into /tmp."""
+    local_paths = [
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansKannada-Regular.otf",
         "/usr/share/fonts/truetype/lohit-kannada/Lohit-Kannada.ttf",
+        "/tmp/NotoSansKannada-Regular.ttf",
         "C:/Windows/Fonts/Nirmala.ttf",
         "C:/Windows/Fonts/Tunga.ttf",
     ]
-    latin_candidates = [
+    for p in local_paths:
+        if os.path.exists(p) and os.path.getsize(p) > 10_000:
+            return p
+
+    font_urls = [
+        "https://github.com/google/fonts/raw/main/ofl/notosanskannada/NotoSansKannada%5Bwght%5D.ttf",
+        "https://github.com/notofonts/kannada/raw/main/fonts/NotoSansKannada/hinted/ttf/NotoSansKannada-Regular.ttf",
+    ]
+    headers = {"User-Agent": "CreatorHubStudio/1.0"}
+    for url in font_urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code == 200 and len(r.content) > 20_000:
+                target = "/tmp/NotoSansKannada-Regular.ttf"
+                with open(target, "wb") as f:
+                    f.write(r.content)
+                return target
+        except Exception:
+            continue
+    return None
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_latin_font_file() -> str | None:
+    latin_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/tmp/DejaVuSans.ttf",
         "C:/Windows/Fonts/arial.ttf",
     ]
-    pool = (kn_candidates + latin_candidates) if prefer_kannada else (latin_candidates + kn_candidates)
-    for path in pool:
-        if os.path.exists(path):
-            return path
+    for p in latin_paths:
+        if os.path.exists(p) and os.path.getsize(p) > 5_000:
+            return p
+    try:
+        r = requests.get(
+            "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf",
+            headers={"User-Agent": "CreatorHubStudio/1.0"},
+            timeout=12,
+        )
+        if r.status_code == 200 and len(r.content) > 10_000:
+            target = "/tmp/DejaVuSans.ttf"
+            with open(target, "wb") as f:
+                f.write(r.content)
+            return target
+    except Exception:
+        pass
     return None
 
 
 def load_font(size: int = 30, prefer_kannada: bool = True):
-    path = find_font_path(prefer_kannada=prefer_kannada)
-    if path:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except Exception:
-            pass
+    kn_path = ensure_kannada_font_file()
+    lat_path = ensure_latin_font_file()
+    ordered = [kn_path, lat_path] if prefer_kannada else [lat_path, kn_path]
+    for path in ordered:
+        if path and os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size=size)
+            except Exception:
+                pass
     return ImageFont.load_default()
 
 
@@ -211,7 +254,6 @@ def wrap_lines(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_l
 
 
 def extract_search_query(description: str) -> str:
-    """Turns a scene description like 'krishna pics with flute' or 'hanuman temple' into a clean search query."""
     clean = (description or "").strip()
     if not clean:
         return "nature landscape"
@@ -224,21 +266,21 @@ def extract_search_query(description: str) -> str:
         return "Lord Krishna"
     if "hanuman" in lowered:
         return "Lord Hanuman"
-    if "nature" in lowered or "forest" in lowered or "mountain" in lowered or "river" in lowered:
-        return clean
     tokens = [
         tok for tok in re.findall(r"[A-Za-z0-9]+", clean)
-        if tok.lower() not in {"pics", "pic", "image", "images", "photo", "photos", "scene", "animated", "video", "show", "me", "get", "a", "an", "the", "with", "of", "in", "on"}
+        if tok.lower() not in {
+            "pics", "pic", "image", "images", "photo", "photos",
+            "scene", "animated", "video", "show", "me", "get",
+            "a", "an", "the", "with", "of", "in", "on",
+        }
     ]
     return " ".join(tokens[:5]) if tokens else clean[:50]
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def search_web_images(query: str, limit: int = 6) -> list[dict]:
-    """Fetches real web images via Wikimedia Commons API with Openverse fallback."""
-    headers = {"User-Agent": "CreatorHubStudio/1.0 (https://github.com/keshavamurthy28/creator-hub)"}
+    headers = {"User-Agent": "CreatorHubStudio/1.0"}
     results: list[dict] = []
-
     try:
         resp = requests.get(
             "https://commons.wikimedia.org/w/api.php",
@@ -249,7 +291,7 @@ def search_web_images(query: str, limit: int = 6) -> list[dict]:
                 "gsrnamespace": 6,
                 "gsrlimit": min(12, max(limit * 2, 6)),
                 "prop": "imageinfo",
-                "iiprop": "url|mime|extmetadata",
+                "iiprop": "url|mime",
                 "iiurlwidth": 1280,
                 "format": "json",
             },
@@ -263,16 +305,17 @@ def search_web_images(query: str, limit: int = 6) -> list[dict]:
                 if not infos:
                     continue
                 info = infos[0]
-                mime = (info.get("mime") or "").lower()
-                if mime not in ("image/jpeg", "image/png", "image/webp"):
+                if (info.get("mime") or "").lower() not in ("image/jpeg", "image/png", "image/webp"):
                     continue
                 img_url = info.get("thumburl") or info.get("url")
-                if not img_url:
-                    continue
-                title = page.get("title", "").replace("File:", "")
-                results.append({"title": title, "url": img_url, "source": "Wikimedia Commons"})
-                if len(results) >= limit:
-                    return results
+                if img_url:
+                    results.append({
+                        "title": page.get("title", "").replace("File:", ""),
+                        "url": img_url,
+                        "source": "Wikimedia Commons",
+                    })
+                    if len(results) >= limit:
+                        return results
     except Exception:
         pass
 
@@ -292,8 +335,8 @@ def search_web_images(query: str, limit: int = 6) -> list[dict]:
                         "url": img_url,
                         "source": "Openverse",
                     })
-                if len(results) >= limit:
-                    break
+                    if len(results) >= limit:
+                        break
     except Exception:
         pass
 
@@ -303,7 +346,7 @@ def search_web_images(query: str, limit: int = 6) -> list[dict]:
 def download_image_from_url(url: str) -> Image.Image | None:
     if not url:
         return None
-    headers = {"User-Agent": "CreatorHubStudio/1.0 (https://github.com/keshavamurthy28/creator-hub)"}
+    headers = {"User-Agent": "CreatorHubStudio/1.0"}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code == 200 and resp.content:
@@ -316,12 +359,12 @@ def download_image_from_url(url: str) -> Image.Image | None:
 
 def _render_illustrated_backdrop(w: int, h: int, idx: int) -> Image.Image:
     themes = [
-        ((26, 68, 112), (244, 176, 96), (34, 96, 54), (22, 68, 38), (255, 224, 130)),
-        ((38, 92, 138), (252, 198, 112), (56, 112, 46), (36, 82, 32), (255, 236, 158)),
-        ((20, 28, 62), (138, 76, 118), (26, 58, 52), (16, 40, 38), (255, 194, 128)),
-        ((32, 76, 92), (168, 214, 198), (38, 98, 64), (24, 68, 46), (255, 240, 185)),
+        ((26, 68, 112), (244, 176, 96), (34, 96, 54), (255, 224, 130)),
+        ((38, 92, 138), (252, 198, 112), (56, 112, 46), (255, 236, 158)),
+        ((20, 28, 62), (138, 76, 118), (26, 58, 52), (255, 194, 128)),
+        ((32, 76, 92), (168, 214, 198), (38, 98, 64), (255, 240, 185)),
     ]
-    sky_top, sky_bot, hill_far, hill_near, sun_col = themes[idx % len(themes)]
+    sky_top, sky_bot, hill_far, sun_col = themes[idx % len(themes)]
     y_grid = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
     x_grid = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
     sky_t = np.clip(y_grid / 0.62, 0.0, 1.0)
@@ -343,23 +386,14 @@ def _render_illustrated_backdrop(w: int, h: int, idx: int) -> Image.Image:
 
     far_pts = [(0, h)]
     for px in range(0, w + 40, 40):
-        py = int(h * 0.56 - 42 * math.sin(px * 0.0065 + idx * 1.3) - 18 * math.cos(px * 0.013))
+        py = int(h * 0.58 - 42 * math.sin(px * 0.0065 + idx * 1.3))
         far_pts.append((px, py))
     far_pts.extend([(w, h)])
     draw.polygon(far_pts, fill=hill_far)
-
-    near_pts = [(0, h)]
-    for px in range(0, w + 40, 40):
-        py = int(h * 0.66 + 26 * math.sin(px * 0.009 + idx * 2.1))
-        near_pts.append((px, py))
-    near_pts.extend([(w, h)])
-    draw.polygon(near_pts, fill=hill_near)
-
     return img
 
 
 def render_scene_frame(scene_info: dict, total_scenes: int, base_photo: Image.Image | None = None) -> Image.Image:
-    """Builds a 1280x720 scene image from a fetched photo or illustrated scenery, with Kannada & English text."""
     w, h = 1280, 720
     idx = max(0, int(scene_info.get("scene_no", 1)) - 1)
     desc = (scene_info.get("visual_prompt") or scene_info.get("narration") or "").strip()
@@ -377,7 +411,7 @@ def render_scene_frame(scene_info: dict, total_scenes: int, base_photo: Image.Im
     font_en = load_font(26, prefer_kannada=False)
     font_kn = load_font(30, prefer_kannada=True)
 
-    draw.rounded_rectangle([32, 24, 460, 68], radius=12, fill=(12, 16, 26))
+    draw.rounded_rectangle([32, 24, 520, 68], radius=12, fill=(12, 16, 26))
     draw.text(
         (48, 34),
         f"SCENE {idx + 1} / {total_scenes}  •  {scene_info.get('motion', 'Zoom')}",
@@ -386,11 +420,11 @@ def render_scene_frame(scene_info: dict, total_scenes: int, base_photo: Image.Im
     )
 
     if desc:
-        en_lines = wrap_lines(draw, desc, font_en, 760, max_lines=2)
+        en_lines = wrap_lines(draw, desc, font_en, 780, max_lines=2)
         if en_lines:
-            card_h = 36 * len(en_lines) + 20
-            draw.rounded_rectangle([32, 82, 820, 82 + card_h], radius=12, fill=(12, 16, 26))
-            ly = 92
+            card_h = 36 * len(en_lines) + 18
+            draw.rounded_rectangle([32, 82, 840, 82 + card_h], radius=12, fill=(12, 16, 26))
+            ly = 90
             for line in en_lines:
                 draw.text((48, ly), line, fill=(245, 248, 252), font=font_en)
                 ly += 36
@@ -916,10 +950,12 @@ with tab_video:
             col = pick_cols[idx % len(pick_cols)]
             with col:
                 st.caption(f"{cand['source']}: {cand['title'][:36]}")
-                st.image(cand["url"], use_container_width=True)
+                cand_img = download_image_from_url(cand["url"])
+                if cand_img is not None:
+                    st.image(cand_img, use_container_width=True)
                 if st.button("➕ Use in Scene", key=f"pick_img_{idx}"):
                     with st.spinner("Building scene from selected image..."):
-                        photo = download_image_from_url(cand["url"])
+                        photo = cand_img or download_image_from_url(cand["url"])
                         next_no = len(st.session_state.scenes) + 1
                         kn_clean = kn_scene_words.strip() or translate_text_free(anim_desc.strip(), "en", "kn")
                         entry = {
