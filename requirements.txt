@@ -1,6 +1,6 @@
-streamlit
-google-genai
-moviepy
-pillow
-edge-tts
-gTTS
+streamlit>=1.30.0
+gTTS>=2.4.0
+Pillow>=10.0.0
+moviepy>=1.0.3
+numpy
+requests
