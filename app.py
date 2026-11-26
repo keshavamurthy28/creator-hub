@@ -2,282 +2,225 @@ import os
 import random
 import tempfile
 import streamlit as st
-from creator_hub_engine import (
-    get_free_ai_scene_image,
-    render_from_scenes,
-    split_script_scenes,
-    translate_text,
+from video_engine import (
+    fetch_scene_image,
+    render_story_video,
+    split_into_story_beats,
+    translate_to_kannada,
 )
 
-st.set_page_config(page_title="Creator Hub — Kannada & English Animated Video Studio", layout="wide")
+st.set_page_config(page_title="Creator Hub — Kannada Animated Story Studio", layout="wide")
 
-if "workspace_dir" not in st.session_state:
-    st.session_state.workspace_dir = tempfile.mkdtemp(prefix="creator_hub_")
+if "work_dir" not in st.session_state:
+    st.session_state.work_dir = tempfile.mkdtemp(prefix="ch_story_")
 if "scenes" not in st.session_state:
     st.session_state.scenes = []
-if "final_video_bytes" not in st.session_state:
-    st.session_state.final_video_bytes = None
-if "title_text" not in st.session_state:
-    st.session_state.title_text = ""
-if "script_text" not in st.session_state:
-    st.session_state.script_text = ""
+if "video_bytes" not in st.session_state:
+    st.session_state.video_bytes = None
+if "render_warnings" not in st.session_state:
+    st.session_state.render_warnings = []
 
-st.title("Creator Hub — Animated Video Studio")
-st.caption("Free Script-to-Video with English → Kannada Translation, Mixed Kannada/English Subtitles, Neural Voiceover & Scene Editor.")
+DEFAULT_SCRIPT = (
+    "Flight landed in forest due to problem and few dies because of that.\n"
+    "Few survives and overcome the hurdle finally and come back.\n"
+    "How they fight animals.\n"
+    "How they find food for survival.\n"
+    "How they learn skills."
+)
 
-# ===========================================================================
-# STEP 1: SCRIPT, TRANSLATION & SETTINGS
-# ===========================================================================
-st.subheader("1. Script, Translation & Visual Settings")
-col1, col2 = st.columns([1.25, 1])
+st.title("Creator Hub — Kannada Animated Story Studio")
+st.caption("Creates multi-scene animated videos with Kannada subtitles, Kannada voiceover, AI visuals, and full scene editing.")
 
-with col1:
-    st.session_state.title_text = st.text_input(
-        "Intro Title Banner (Shown on Scene 1)",
-        value=st.session_state.title_text,
-        placeholder="e.g., Divine Meditation by the River / ನದಿಯ ತೀರದಲ್ಲಿ ಧ್ಯಾನ",
+left, right = st.columns([1.3, 1])
+
+with left:
+    script_input = st.text_area(
+        "Story Script (One sentence/line per scene — English or Kannada)",
+        value=DEFAULT_SCRIPT,
+        height=160,
     )
-    description = st.text_area(
-        "Visual Style & Creative Description (Used for AI image generation)",
-        placeholder="e.g., Peaceful river flowing in nature, 40 year old yogi meditating, golden divine aura, cinematic digital art...",
+    style_desc = st.text_area(
+        "Visual Style & Animation Mood (Used to generate rich scene illustrations)",
+        value="2d animated adventure story, dense tropical forest, dramatic lighting, expressive characters, cinematic atmosphere",
         height=85,
     )
-    st.session_state.script_text = st.text_area(
-        "Video Script (Each sentence becomes an editable scene)",
-        value=st.session_state.script_text,
-        placeholder="Write in English or Kannada. Click 'Translate to Kannada' below to convert automatically!",
-        height=145,
-    )
 
-    tr_col1, tr_col2 = st.columns(2)
-    with tr_col1:
-        if st.button("Translate Script & Title to Kannada (ಕನ್ನಡ)", use_container_width=True):
-            if st.session_state.script_text.strip():
-                st.session_state.script_text = translate_text(st.session_state.script_text, target_lang="kn")
-            if st.session_state.title_text.strip():
-                st.session_state.title_text = translate_text(st.session_state.title_text, target_lang="kn")
-            st.rerun()
-    with tr_col2:
-        if st.button("Translate Script & Title to English", use_container_width=True):
-            if st.session_state.script_text.strip():
-                st.session_state.script_text = translate_text(st.session_state.script_text, target_lang="en")
-            if st.session_state.title_text.strip():
-                st.session_state.title_text = translate_text(st.session_state.title_text, target_lang="en")
-            st.rerun()
-
-with col2:
-    aspect = st.selectbox(
-        "Video Format",
-        ["16:9 YouTube / Landscape (1280x720)", "9:16 Reels / Shorts (720x1280)", "1:1 Square (1080x1080)"],
+with right:
+    fmt = st.selectbox(
+        "Aspect Ratio & Resolution",
+        ["16:9 Landscape (1280x720)", "9:16 Reels/Shorts (720x1280)", "1:1 Square (1080x1080)"],
     )
     res_map = {
-        "16:9 YouTube / Landscape (1280x720)": (1280, 720),
-        "9:16 Reels / Shorts (720x1280)": (720, 1280),
+        "16:9 Landscape (1280x720)": (1280, 720),
+        "9:16 Reels/Shorts (720x1280)": (720, 1280),
         "1:1 Square (1080x1080)": (1080, 1080),
     }
-    res_w, res_h = res_map[aspect]
+    res_w, res_h = res_map[fmt]
 
-    enable_vo = st.checkbox("Enable Free Neural Voiceover", value=True)
-    voices = {
-        "Kannada — Sapna (Female)": "kn-IN-SapnaNeural",
-        "Kannada — Gagan (Male)": "kn-IN-GaganNeural",
-        "English (India) — Neerja (Female)": "en-IN-NeerjaNeural",
-        "English (India) — Prabhat (Male)": "en-IN-PrabhatNeural",
-        "Hindi — Swara (Female)": "hi-IN-SwaraNeural",
-    }
-    selected_voice_label = st.selectbox("Narrator Voice", list(voices.keys()))
-    selected_voice = voices[selected_voice_label]
+    enable_audio = st.checkbox("Generate Voiceover Audio", value=True)
+    voice_choice = st.selectbox(
+        "Voiceover Language & Voice",
+        [
+            ("Kannada — Sapna (Female)", "kn-IN-SapnaNeural"),
+            ("Kannada — Gagan (Male)", "kn-IN-GaganNeural"),
+            ("English (India) — Neerja", "en-IN-NeerjaNeural"),
+        ],
+        format_func=lambda x: x[0],
+    )[1]
 
-    uploaded_files = st.file_uploader(
-        "Optional: Upload Your Own Scene Images",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,
-    )
+    always_kn_subs = st.checkbox("Always show Kannada subtitles (auto-translates English lines)", value=True)
 
-if st.button("Build Editable Storyboard Scenes", type="primary", use_container_width=True):
-    raw_script = st.session_state.script_text.strip() or description.strip()
-    if not raw_script:
-        st.error("Please enter a script or description first.")
+if st.button("1. Generate Storyboard & Kannada Subtitles", type="primary", use_container_width=True):
+    beats = split_into_story_beats(script_input)
+    if not beats:
+        st.error("Please write at least one line in the script.")
     else:
-        beats = split_script_scenes(raw_script)
-        saved_uploads = []
-        if uploaded_files:
-            for i, uf in enumerate(uploaded_files):
-                ext = os.path.splitext(uf.name)[1] or ".png"
-                p = os.path.join(st.session_state.workspace_dir, f"up_{i}_{random.randint(100,999)}{ext}")
-                with open(p, "wb") as f:
-                    f.write(uf.getbuffer())
-                saved_uploads.append(p)
-
         motions = ["zoom_in", "pan_right", "ken_burns_diag", "zoom_out", "pan_left"]
-        new_scenes = []
-        prog = st.progress(0.0, text="Generating initial storyboard scenes...")
+        built_scenes = []
+        prog = st.progress(0.0, text="Preparing scenes...")
+
         for idx, beat in enumerate(beats):
-            prog.progress(idx / len(beats), text=f"Preparing scene {idx + 1}/{len(beats)}...")
-            if idx < len(saved_uploads):
-                img_p = saved_uploads[idx]
-            else:
-                img_p = os.path.join(st.session_state.workspace_dir, f"scene_{idx}_{random.randint(1000,9999)}.jpg")
-                get_free_ai_scene_image(
-                    scene_prompt=f"{beat}. {description}",
-                    style_desc=description or "cinematic digital art",
-                    width=res_w,
-                    height=res_h,
-                    out_path=img_p,
-                    seed=random.randint(1, 99999),
-                )
-            new_scenes.append(
+            prog.progress(idx / len(beats), text=f"Generating scene {idx + 1}/{len(beats)}...")
+            kn_text = translate_to_kannada(beat) if always_kn_subs else beat
+            visual_prompt = f"{beat}. Story setting: {style_desc}"
+            img_path = os.path.join(st.session_state.work_dir, f"sc_{idx}_{random.randint(1000,9999)}.jpg")
+            fetch_scene_image(
+                visual_prompt=visual_prompt,
+                width=res_w,
+                height=res_h,
+                out_path=img_path,
+                seed=500 + idx * 41,
+            )
+            built_scenes.append(
                 {
-                    "top_title": st.session_state.title_text.strip() if idx == 0 else "",
-                    "caption": beat,
-                    "narration": beat,
-                    "duration": 4.0,
+                    "scene_label": f"ದೃಶ್ಯ {idx + 1} / Scene {idx + 1}",
+                    "raw_line": beat,
+                    "subtitle_kn": kn_text,
+                    "narration_kn": kn_text,
+                    "visual_prompt": visual_prompt,
                     "motion": motions[idx % len(motions)],
-                    "image_path": img_p,
-                    "visual_prompt": f"{beat}. {description}",
+                    "duration": 5.0,
+                    "image_path": img_path,
                 }
             )
-        prog.progress(1.0, text="Storyboard ready!")
-        st.session_state.scenes = new_scenes
+
+        prog.progress(1.0, text="Storyboard created!")
+        st.session_state.scenes = built_scenes
+        st.session_state.video_bytes = None
         st.rerun()
 
 # ===========================================================================
-# STEP 2: SCENE-BY-SCENE VIDEO EDITOR
+# SCENE EDITOR
 # ===========================================================================
 if st.session_state.scenes:
     st.divider()
-    st.subheader("2. Scene Editor (Edit Subtitles, Voice Text, Motion, Order & Images)")
+    st.subheader("2. Edit Scenes (Kannada Subtitles, Voice Text, Visual Prompt, Image & Motion)")
 
-    motions_list = ["zoom_in", "zoom_out", "pan_right", "pan_left", "ken_burns_diag"]
-    to_delete = None
-    swap_pair = None
+    motion_opts = ["zoom_in", "zoom_out", "pan_right", "pan_left", "ken_burns_diag"]
+    delete_idx = None
+    swap_idx = None
 
     for idx, sc in enumerate(st.session_state.scenes):
-        with st.expander(f"Scene {idx + 1}: {sc['caption'][:55]}...", expanded=True):
-            c_img, c_edit = st.columns([1, 1.7])
+        with st.expander(f"Scene {idx + 1}: {sc['subtitle_kn']}", expanded=True):
+            c1, c2 = st.columns([1, 1.8])
 
-            with c_img:
+            with c1:
                 if os.path.exists(sc["image_path"]):
                     st.image(sc["image_path"], use_container_width=True)
 
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("Regenerate AI Art", key=f"regen_{idx}", use_container_width=True):
-                        new_p = os.path.join(
-                            st.session_state.workspace_dir, f"regen_{idx}_{random.randint(1000,99999)}.jpg"
-                        )
-                        get_free_ai_scene_image(
-                            scene_prompt=sc["visual_prompt"],
-                            style_desc=description or "cinematic digital art",
+                b_regen, b_kn = st.columns(2)
+                with b_regen:
+                    if st.button("New AI Image", key=f"img_btn_{idx}", use_container_width=True):
+                        np_path = os.path.join(st.session_state.work_dir, f"regen_{idx}_{random.randint(1000,99999)}.jpg")
+                        fetch_scene_image(
+                            visual_prompt=sc["visual_prompt"],
                             width=res_w,
                             height=res_h,
-                            out_path=new_p,
+                            out_path=np_path,
                             seed=random.randint(1, 999999),
                         )
-                        st.session_state.scenes[idx]["image_path"] = new_p
+                        st.session_state.scenes[idx]["image_path"] = np_path
                         st.rerun()
-                with b2:
-                    if st.button("Translate to ಕನ್ನಡ", key=f"tr_sc_{idx}", use_container_width=True):
-                        kn_line = translate_text(sc["caption"], target_lang="kn")
-                        st.session_state.scenes[idx]["caption"] = kn_line
-                        st.session_state.scenes[idx]["narration"] = kn_line
-                        if sc["top_title"].strip():
-                            st.session_state.scenes[idx]["top_title"] = translate_text(sc["top_title"], target_lang="kn")
+                with b_kn:
+                    if st.button("Re-Translate KN", key=f"kn_btn_{idx}", use_container_width=True):
+                        kn = translate_to_kannada(sc["subtitle_kn"] or sc["raw_line"])
+                        st.session_state.scenes[idx]["subtitle_kn"] = kn
+                        st.session_state.scenes[idx]["narration_kn"] = kn
                         st.rerun()
 
-                rep_file = st.file_uploader(
-                    "Replace Scene Image", type=["png", "jpg", "jpeg", "webp"], key=f"rep_img_{idx}"
-                )
-                if rep_file is not None:
-                    ext = os.path.splitext(rep_file.name)[1] or ".png"
-                    rep_path = os.path.join(
-                        st.session_state.workspace_dir, f"custom_{idx}_{random.randint(1000,9999)}{ext}"
-                    )
-                    with open(rep_path, "wb") as f:
-                        f.write(rep_file.getbuffer())
-                    st.session_state.scenes[idx]["image_path"] = rep_path
+                up = st.file_uploader("Upload Custom Image", type=["png", "jpg", "jpeg", "webp"], key=f"up_{idx}")
+                if up is not None:
+                    ext = os.path.splitext(up.name)[1] or ".png"
+                    up_path = os.path.join(st.session_state.work_dir, f"custom_{idx}_{random.randint(1000,9999)}{ext}")
+                    with open(up_path, "wb") as f:
+                        f.write(up.getbuffer())
+                    st.session_state.scenes[idx]["image_path"] = up_path
 
-            with c_edit:
-                sc["top_title"] = st.text_input("Top Title Banner (Optional)", value=sc["top_title"], key=f"top_{idx}")
-                sc["caption"] = st.text_area("Subtitle Text (Shown on Video)", value=sc["caption"], height=70, key=f"cap_{idx}")
-                sc["narration"] = st.text_area(
-                    "Voiceover Text (Spoken by Narrator)", value=sc["narration"], height=65, key=f"nar_{idx}"
-                )
+            with c2:
+                sc["subtitle_kn"] = st.text_area("Kannada Subtitle on Video", value=sc["subtitle_kn"], height=70, key=f"sub_{idx}")
+                sc["narration_kn"] = st.text_area("Kannada Voiceover Text", value=sc["narration_kn"], height=65, key=f"nar_{idx}")
+                sc["visual_prompt"] = st.text_input("Scene Image Prompt (English works best)", value=sc["visual_prompt"], key=f"vp_{idx}")
 
-                m1, m2 = st.columns(2)
-                with m1:
+                m_col, d_col = st.columns(2)
+                with m_col:
                     sc["motion"] = st.selectbox(
                         "Camera Animation",
-                        motions_list,
-                        index=motions_list.index(sc["motion"]) if sc["motion"] in motions_list else 0,
+                        motion_opts,
+                        index=motion_opts.index(sc["motion"]) if sc["motion"] in motion_opts else 0,
                         key=f"mot_{idx}",
                     )
-                with m2:
-                    sc["duration"] = st.slider(
-                        "Min Duration (sec)", 2.0, 12.0, float(sc["duration"]), 0.5, key=f"dur_{idx}"
-                    )
+                with d_col:
+                    sc["duration"] = st.slider("Minimum Scene Seconds", 2.0, 12.0, float(sc["duration"]), 0.5, key=f"dur_{idx}")
 
-                act1, act2, act3 = st.columns(3)
-                with act1:
-                    if idx > 0 and st.button("Move Up", key=f"up_{idx}", use_container_width=True):
-                        swap_pair = (idx, idx - 1)
-                with act2:
-                    if idx < len(st.session_state.scenes) - 1 and st.button("Move Down", key=f"dn_{idx}", use_container_width=True):
-                        swap_pair = (idx, idx + 1)
-                with act3:
-                    if len(st.session_state.scenes) > 1 and st.button("Delete Scene", key=f"del_{idx}", use_container_width=True):
-                        to_delete = idx
+                o1, o2, o3 = st.columns(3)
+                with o1:
+                    if idx > 0 and st.button("Move Up", key=f"up_b_{idx}", use_container_width=True):
+                        swap_idx = (idx, idx - 1)
+                with o2:
+                    if idx < len(st.session_state.scenes) - 1 and st.button("Move Down", key=f"dn_b_{idx}", use_container_width=True):
+                        swap_idx = (idx, idx + 1)
+                with o3:
+                    if len(st.session_state.scenes) > 1 and st.button("Remove Scene", key=f"rm_b_{idx}", use_container_width=True):
+                        delete_idx = idx
 
-    if swap_pair:
-        i, j = swap_pair
-        st.session_state.scenes[i], st.session_state.scenes[j] = st.session_state.scenes[j], st.session_state.scenes[i]
+    if swap_idx:
+        a, b = swap_idx
+        st.session_state.scenes[a], st.session_state.scenes[b] = st.session_state.scenes[b], st.session_state.scenes[a]
         st.rerun()
-    if to_delete is not None:
-        st.session_state.scenes.pop(to_delete)
-        st.rerun()
-
-    if st.button("+ Add New Blank Scene", use_container_width=True):
-        blank_p = os.path.join(st.session_state.workspace_dir, f"blank_{random.randint(1000,9999)}.jpg")
-        get_free_ai_scene_image("serene cinematic landscape", "digital art", res_w, res_h, blank_p, random.randint(1, 99999))
-        st.session_state.scenes.append(
-            {
-                "top_title": "",
-                "caption": "ಹೊಸ ದೃಶ್ಯ / New scene text",
-                "narration": "ಹೊಸ ದೃಶ್ಯ",
-                "duration": 4.0,
-                "motion": "zoom_in",
-                "image_path": blank_p,
-                "visual_prompt": "serene cinematic landscape",
-            }
-        )
+    if delete_idx is not None:
+        st.session_state.scenes.pop(delete_idx)
         st.rerun()
 
     # =======================================================================
-    # STEP 3: RENDER FINAL VIDEO
+    # RENDER VIDEO
     # =======================================================================
     st.divider()
-    if st.button("Render Final Animated Video", type="primary", use_container_width=True):
-        out_mp4 = os.path.join(st.session_state.workspace_dir, f"final_{random.randint(1000,9999)}.mp4")
-        r_prog = st.progress(0.0, text="Starting video render...")
-        render_from_scenes(
+    if st.button("3. Render Animated Video with Kannada Voice & Subtitles", type="primary", use_container_width=True):
+        out_path = os.path.join(st.session_state.work_dir, f"output_{random.randint(1000,9999)}.mp4")
+        r_prog = st.progress(0.0, text="Rendering video...")
+        vid_file, warns = render_story_video(
             scenes=st.session_state.scenes,
-            workdir=st.session_state.workspace_dir,
-            output_path=out_mp4,
+            workdir=st.session_state.work_dir,
+            out_mp4=out_path,
             resolution=(res_w, res_h),
-            enable_voiceover=enable_vo,
-            voice_name=selected_voice,
-            progress_callback=lambda p, msg: r_prog.progress(p, text=msg),
+            enable_audio=enable_audio,
+            voice=voice_choice,
+            progress_cb=lambda p, msg: r_prog.progress(p, text=msg),
         )
-        with open(out_mp4, "rb") as f:
-            st.session_state.final_video_bytes = f.read()
+        with open(vid_file, "rb") as f:
+            st.session_state.video_bytes = f.read()
+        st.session_state.render_warnings = warns
 
-    if st.session_state.final_video_bytes:
-        st.success("Your edited animated video is ready!")
-        st.video(st.session_state.final_video_bytes)
+    for w in st.session_state.render_warnings:
+        st.warning(w)
+
+    if st.session_state.video_bytes:
+        st.success("Final video rendered!")
+        st.video(st.session_state.video_bytes)
         st.download_button(
-            label="Download MP4 Video",
-            data=st.session_state.final_video_bytes,
-            file_name="creator_hub_kannada_animated.mp4",
+            label="Download MP4",
+            data=st.session_state.video_bytes,
+            file_name="forest_survival_kannada.mp4",
             mime="video/mp4",
             use_container_width=True,
         )
