@@ -1,3 +1,4 @@
 fonts-noto-core
 fonts-noto-ui-core
+fonts-dejavu-core
 ffmpeg
